@@ -1,0 +1,7 @@
+{
+  "routes": [
+    { "handle": "filesystem" },
+    { "src": "^/api/zapi/(.*)$", "dest": "/api/zapi?route=$1" },
+    { "src": "/(.*)", "dest": "/index.html" }
+  ]
+}
