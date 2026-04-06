@@ -1,6 +1,6 @@
-import { Users, MessageSquare, MoreVertical, CircleDashed } from 'lucide-react';
+import { Users, MessageSquare, MoreVertical, CircleDashed, Download } from 'lucide-react';
 
-export function SidebarHeader() {
+export function SidebarHeader({ onImportContacts }: { onImportContacts?: () => void }) {
   return (
     <div className="h-[59px] bg-wa-header flex items-center justify-between px-4 border-b border-wa-border shrink-0">
       <div className="w-10 h-10 rounded-full bg-gray-300 overflow-hidden cursor-pointer">
@@ -11,6 +11,14 @@ export function SidebarHeader() {
         />
       </div>
       <div className="flex items-center gap-3 text-[#54656f]">
+        <button
+          type="button"
+          onClick={onImportContacts}
+          title="Importar contatos (Z-API)"
+          className="p-2 rounded-full hover:bg-gray-200 transition-colors"
+        >
+          <Download size={20} />
+        </button>
         <button className="p-2 rounded-full hover:bg-gray-200 transition-colors">
           <Users size={20} />
         </button>

@@ -94,6 +94,7 @@ export const zapi = {
   getChats: () => (directApi ? directApi.chats.getChats() : apiGet('/api/zapi/chats')),
   getChatMessages: (phone: string) =>
     directApi ? directApi.chats.getChatMessages(phone) : apiGet(`/api/zapi/chat-messages?phone=${encodeURIComponent(phone)}`),
+  getContacts: () => (directApi ? directApi.contacts.getAll() : apiGet('/api/zapi/contacts')),
   sendText: (phone: string, message: string, opts?: any): Promise<ZapiSendResponse> =>
     directApi
       ? directApi.messages.sendText(phone, message, opts)

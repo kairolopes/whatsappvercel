@@ -3,6 +3,8 @@ import { supabase } from '@/lib/supabase';
 import { zapi } from '@/lib/zapi';
 import { fileToBase64 } from '@/utils/media';
 
+const DEFAULT_SHARED_SECRET = 'rokzap_2026_03_29_a8d2b7c1f4e9';
+
 export interface Conversation {
   id: string;
   contact_name: string;
@@ -206,6 +208,7 @@ interface ChatState {
   error: string | null;
   
   fetchConversations: (silent?: boolean) => Promise<void>;
+  importContacts: () => Promise<{ imported: number }>;
   fetchMessages: (conversationId: string, silent?: boolean) => Promise<void>;
   setActiveConversation: (id: string) => void;
   sendMessage: (text: string) => Promise<void>;
@@ -250,6 +253,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   fetchConversations: async (silent = false) => {
     if (!silent) set({ isLoading: true, error: null });
     try {
+      let zapiConversations: Conversation[] | null = null;
+
       try {
         const raw = await zapi.getChats();
         const zapiChats = Array.isArray(raw) ? raw : Array.isArray((raw as any)?.chats) ? (raw as any).chats : [];
@@ -284,20 +289,61 @@ export const useChatStore = create<ChatState>((set, get) => ({
             if (!c.id) continue;
             uniqueById.set(c.id, c);
           }
-
-          const uniqueConversations = Array.from(uniqueById.values());
-
-          set({ conversations: uniqueConversations, isLoading: false });
-          
-          // Auto-select first conversation
-          const currentActiveId = get().activeConversationId;
-          if (!currentActiveId && uniqueConversations.length > 0) {
-            set({ activeConversationId: uniqueConversations[0].id });
-            get().fetchMessages(uniqueConversations[0].id);
-          }
-          return;
+          zapiConversations = Array.from(uniqueById.values());
         }
-      } catch (zapiError) {
+      } catch {
+      }
+
+      let supabaseConversations: Conversation[] = [];
+      try {
+        const { data } = await supabase
+          .from('conversations')
+          .select('*')
+          .order('created_at', { ascending: false });
+        supabaseConversations = (data as Conversation[]) ?? [];
+      } catch {
+      }
+
+      if (zapiConversations && zapiConversations.length > 0) {
+        const keyOf = (c: Conversation) => {
+          const p = normalizePhone(String((c as any)?.phone ?? ''));
+          return p || String(c.id ?? '');
+        };
+
+        const merged = new Map<string, Conversation>();
+        for (const c of zapiConversations) {
+          const k = keyOf(c);
+          if (!k) continue;
+          merged.set(k, c);
+        }
+
+        for (const c of supabaseConversations) {
+          const k = keyOf(c);
+          if (!k) continue;
+          const existing = merged.get(k);
+          if (!existing) {
+            merged.set(k, c);
+            continue;
+          }
+          merged.set(k, {
+            ...existing,
+            phone: existing.phone || c.phone,
+            contact_name: String(existing.contact_name ?? '').trim() ? existing.contact_name : c.contact_name,
+            avatar_url: existing.avatar_url || c.avatar_url,
+            last_message: String(existing.last_message ?? '').trim() ? existing.last_message : c.last_message,
+            last_message_time: String(existing.last_message_time ?? '').trim() ? existing.last_message_time : c.last_message_time,
+          });
+        }
+
+        const final = Array.from(merged.values());
+        set({ conversations: final, isLoading: false });
+
+        const currentActiveId = get().activeConversationId;
+        if (!currentActiveId && final.length > 0) {
+          set({ activeConversationId: final[0].id });
+          get().fetchMessages(final[0].id);
+        }
+        return;
       }
 
       const { data, error } = await supabase
@@ -352,6 +398,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (error: any) {
       set({ error: error.message, isLoading: false });
     }
+  },
+
+  importContacts: async () => {
+    set({ error: null });
+    const raw = await zapi.getContacts();
+    const contacts =
+      Array.isArray(raw)
+        ? raw
+        : Array.isArray((raw as any)?.contacts)
+          ? (raw as any).contacts
+          : Array.isArray((raw as any)?.data)
+            ? (raw as any).data
+            : [];
+
+    const byPhone = new Map<string, { phone: string; contact_name: string; avatar_url: string | null }>();
+    for (const c of contacts as any[]) {
+      const phone = normalizePhone(String(c?.phone ?? c?.id ?? c?.number ?? ''));
+      if (!phone || phone.length < 8) continue;
+      const name = String(c?.vname ?? c?.notify ?? c?.short ?? c?.name ?? phone).trim() || phone;
+      const avatar = typeof c?.imgUrl === 'string' && c.imgUrl.trim() ? String(c.imgUrl) : null;
+      byPhone.set(phone, { phone, contact_name: name, avatar_url: avatar });
+    }
+
+    const rows = Array.from(byPhone.values()).map((c) => ({
+      phone: c.phone,
+      contact_name: c.contact_name,
+      avatar_url: c.avatar_url,
+      last_message: '',
+      last_message_time: '',
+      unread_count: 0,
+      is_active: true,
+    }));
+
+    if (rows.length === 0) return { imported: 0 };
+
+    const { error } = await supabase
+      .from('conversations')
+      .upsert(rows as any, { onConflict: 'phone' });
+
+    if (error) {
+      set({ error: error.message });
+      throw error;
+    }
+
+    await get().fetchConversations(true);
+    return { imported: rows.length };
   },
 
   fetchMessages: async (conversationId: string, silent = false) => {
@@ -582,7 +674,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (prefersSignedUpload) {
         const signedRes = await fetch('/api/media/signed-upload', {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', 'x-admin-token': DEFAULT_SHARED_SECRET },
           credentials: 'include',
           body: JSON.stringify({
             fileName: file.name,

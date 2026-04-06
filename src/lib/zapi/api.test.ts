@@ -71,6 +71,30 @@ describe('createZapiApi', () => {
     expect(urls.some((u) => u.endsWith('/send-button-pix'))).toBe(true);
   });
 
+  it('calls contacts endpoints', async () => {
+    const fetcher = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+
+    const client = new ZapiClient(
+      { instanceId: 'I', token: 'T', clientToken: 'CT' },
+      { fetcher },
+    );
+    const api = createZapiApi(client);
+
+    await api.contacts.getAll();
+    await api.contacts.get('5511999999999');
+
+    const urls = fetcher.mock.calls.map((c: any[]) => String(c[0]));
+    expect(urls.some((u) => u.endsWith('/contacts'))).toBe(true);
+    expect(urls.some((u) => u.includes('/contact/5511999999999'))).toBe(true);
+  });
+
   it('calls forward-message', async () => {
     const fetcher = vi.fn().mockImplementation(() =>
       Promise.resolve(

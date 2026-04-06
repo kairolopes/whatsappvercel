@@ -118,6 +118,10 @@ function normalizeRoute(value: unknown): string {
   return r.replace(/^\/+/, '').replace(/\/+$/, '');
 }
 
+function normalizeContactPhone(value: unknown): string {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
 export default async function handler(req: AnyReq, res: AnyRes) {
   if (!rateLimit(req, res)) return;
 
@@ -164,6 +168,7 @@ export default async function handler(req: AnyReq, res: AnyRes) {
         routes: [
           'login',
           'logout',
+          'contacts',
           'chats',
           'chat-messages',
           'send-text',
@@ -173,10 +178,12 @@ export default async function handler(req: AnyReq, res: AnyRes) {
           'send-video',
           'send-ptv',
           'send-audio',
+          'send-message-audio',
           'send-document',
           'send-link',
           'send-location',
           'send-contact',
+          'send-message-contact',
           'send-contacts',
           'send-option-list',
           'send-button-pix',
@@ -196,6 +203,12 @@ export default async function handler(req: AnyReq, res: AnyRes) {
 
     if (route === 'chats' && req.method === 'GET') {
       const data = await zapiFetch('GET', '/chats');
+      json(res, 200, { ok: true, data });
+      return;
+    }
+
+    if (route === 'contacts' && req.method === 'GET') {
+      const data = await zapiFetch('GET', '/contacts');
       json(res, 200, { ok: true, data });
       return;
     }
@@ -289,7 +302,7 @@ export default async function handler(req: AnyReq, res: AnyRes) {
       return;
     }
 
-    if (route === 'send-audio' && req.method === 'POST') {
+    if ((route === 'send-audio' || route === 'send-message-audio') && req.method === 'POST') {
       const body = await readJsonBody(req);
       const phone = String(body?.phone ?? '');
       const audio = String(body?.audio ?? '');
@@ -370,11 +383,11 @@ export default async function handler(req: AnyReq, res: AnyRes) {
       return;
     }
 
-    if (route === 'send-contact' && req.method === 'POST') {
+    if ((route === 'send-contact' || route === 'send-message-contact') && req.method === 'POST') {
       const body = await readJsonBody(req);
       const phone = String(body?.phone ?? '');
       const contactName = String(body?.contactName ?? '');
-      const contactPhone = String(body?.contactPhone ?? '');
+      const contactPhone = normalizeContactPhone(body?.contactPhone);
       if (!phone || !contactName || !contactPhone) {
         json(res, 400, { ok: false, reason: 'missing_fields' });
         return;
@@ -401,9 +414,29 @@ export default async function handler(req: AnyReq, res: AnyRes) {
         json(res, 400, { ok: false, reason: 'missing_fields' });
         return;
       }
+
+      const normalizedContacts = contacts
+        .map((c: any) => {
+          const name = String(c?.name ?? '').trim();
+          const phones = Array.isArray(c?.phones) ? c.phones.map((p: any) => normalizeContactPhone(p)).filter(Boolean) : [];
+          if (!name || phones.length === 0) return null;
+          const businessDescription = typeof c?.businessDescription === 'string' ? c.businessDescription : undefined;
+          return {
+            name,
+            phones,
+            ...(businessDescription ? { businessDescription } : {}),
+          };
+        })
+        .filter(Boolean);
+
+      if (normalizedContacts.length === 0) {
+        json(res, 400, { ok: false, reason: 'missing_fields' });
+        return;
+      }
+
       const data = await zapiFetch('POST', '/send-contacts', {
         phone,
-        contacts,
+        contacts: normalizedContacts,
         ...(typeof body?.messageId === 'string' ? { messageId: body.messageId } : {}),
         ...(typeof body?.delayMessage === 'number' ? { delayMessage: body.delayMessage } : {}),
       });

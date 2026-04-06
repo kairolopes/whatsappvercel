@@ -98,6 +98,15 @@ export default async function handler(req: any, res: any) {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
+  try {
+    const { data: buckets } = await sb.storage.listBuckets();
+    const exists = Array.isArray(buckets) && buckets.some((b: any) => b?.name === bucket);
+    if (!exists) {
+      await sb.storage.createBucket(bucket, { public: true });
+    }
+  } catch {
+  }
+
   const path = `${folder}/${Date.now()}_${fileName}`;
   const { data, error } = await sb.storage.from(bucket).createSignedUploadUrl(path);
   if (error || !data?.token || !data?.path) {
@@ -117,4 +126,3 @@ export default async function handler(req: any, res: any) {
     },
   });
 }
-

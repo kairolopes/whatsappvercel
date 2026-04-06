@@ -3,6 +3,7 @@ import { Check, CheckCheck, ChevronDown, Trash2, Play, Pause, MapPin, User, User
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useChatStore } from '@/store/chatStore';
 import { prettyBytes } from '@/utils/media';
+import { buildGoogleMapsUrl, buildGoogleStaticMapUrl } from '@/utils/maps';
 
 interface MessageBubbleProps {
   id: string;
@@ -195,10 +196,19 @@ export function MessageBubble({ text, sender, time, status, kind = 'text', meta,
       const address = asString((meta as any)?.address) || '';
       const latitude = asString((meta as any)?.latitude) || '';
       const longitude = asString((meta as any)?.longitude) || '';
-      const mapsUrl = latitude && longitude ? `https://www.google.com/maps?q=${encodeURIComponent(`${latitude},${longitude}`)}` : '';
+      const mapsUrl = buildGoogleMapsUrl(latitude, longitude);
+      const apiKey = (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) ?? '';
+      const thumbUrl = apiKey
+        ? buildGoogleStaticMapUrl({ apiKey, latitude, longitude, width: 520, height: 220, zoom: 16, scale: 2 })
+        : '';
       return (
         <div className="w-[360px] max-w-full">
           <a href={mapsUrl || undefined} target={mapsUrl ? '_blank' : undefined} rel="noreferrer" className="block rounded-lg border border-black/10 bg-white/70 p-3 hover:bg-white">
+            {thumbUrl ? (
+              <div className="mb-2 overflow-hidden rounded-lg border border-black/10 bg-white">
+                <img src={thumbUrl} className="w-full h-[140px] object-cover" />
+              </div>
+            ) : null}
             <div className="flex items-center gap-2">
               <MapPin size={18} className="text-[#d92929]" />
               <div className="text-[14px] text-wa-text font-medium">{title}</div>

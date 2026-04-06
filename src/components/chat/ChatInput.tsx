@@ -2,6 +2,7 @@ import { Smile, Paperclip, Mic, Send, Image as ImageIcon, FileText, Sticker, Fil
 import { useEffect, useMemo, useRef, useState, FormEvent } from 'react';
 import { useChatStore } from '@/store/chatStore';
 import { prettyBytes } from '@/utils/media';
+import { LocationPickerModal } from '@/components/chat/LocationPickerModal';
 
 type MediaKind = 'image' | 'sticker' | 'gif' | 'audio' | 'video' | 'ptv' | 'document';
 
@@ -26,10 +27,7 @@ export function ChatInput() {
   const [linkPreview, setLinkPreview] = useState<{ title: string; description: string; image: string; domain: string } | null>(null);
 
   const [locationOpen, setLocationOpen] = useState(false);
-  const [locationTitle, setLocationTitle] = useState('');
-  const [locationAddress, setLocationAddress] = useState('');
-  const [locationLatitude, setLocationLatitude] = useState('');
-  const [locationLongitude, setLocationLongitude] = useState('');
+  const [locationSending, setLocationSending] = useState(false);
 
   const [contactOpen, setContactOpen] = useState(false);
   const [contactName, setContactName] = useState('');
@@ -170,10 +168,6 @@ export function ChatInput() {
   const openLocation = () => {
     setAttachOpen(false);
     setLocationOpen(true);
-    setLocationTitle('');
-    setLocationAddress('');
-    setLocationLatitude('');
-    setLocationLongitude('');
   };
 
   const openContact = () => {
@@ -226,18 +220,16 @@ export function ChatInput() {
     }
   };
 
-  const sendSelectedLocation = async () => {
+  const sendSelectedLocation = async (payload: { title: string; address: string; latitude: string; longitude: string }) => {
+    setLocationSending(true);
     try {
-      await sendLocation({
-        title: locationTitle,
-        address: locationAddress,
-        latitude: locationLatitude,
-        longitude: locationLongitude,
-      });
+      await sendLocation(payload);
       setLocationOpen(false);
     } catch {
       const msg = useChatStore.getState().error || 'Falha ao enviar';
       window.alert(msg);
+    } finally {
+      setLocationSending(false);
     }
   };
 
@@ -510,29 +502,12 @@ export function ChatInput() {
         </div>
       )}
 
-      {locationOpen && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
-          <div className="w-[640px] max-w-[92vw] bg-white rounded-lg overflow-hidden shadow-xl">
-            <div className="h-[56px] px-4 flex items-center justify-between bg-wa-header">
-              <div className="text-[14px] text-wa-text">Enviar localização</div>
-              <button type="button" onClick={() => setLocationOpen(false)} className="p-2 rounded-full hover:bg-gray-200 transition-colors">
-                <X size={20} />
-              </button>
-            </div>
-            <div className="p-4 space-y-3">
-              <input value={locationTitle} onChange={(e) => setLocationTitle(e.target.value)} placeholder="Título" className="w-full h-[42px] rounded-lg border border-wa-border px-3 text-[14px] outline-none" />
-              <input value={locationAddress} onChange={(e) => setLocationAddress(e.target.value)} placeholder="Endereço" className="w-full h-[42px] rounded-lg border border-wa-border px-3 text-[14px] outline-none" />
-              <div className="flex gap-2">
-                <input value={locationLatitude} onChange={(e) => setLocationLatitude(e.target.value)} placeholder="Latitude" className="flex-1 h-[42px] rounded-lg border border-wa-border px-3 text-[14px] outline-none" />
-                <input value={locationLongitude} onChange={(e) => setLocationLongitude(e.target.value)} placeholder="Longitude" className="flex-1 h-[42px] rounded-lg border border-wa-border px-3 text-[14px] outline-none" />
-              </div>
-              <button type="button" onClick={sendSelectedLocation} className="mt-2 w-full h-[40px] rounded-full bg-[#00a884] text-white text-[14px] hover:brightness-95">
-                Enviar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <LocationPickerModal
+        open={locationOpen}
+        isSending={locationSending}
+        onClose={() => setLocationOpen(false)}
+        onConfirm={sendSelectedLocation}
+      />
 
       {contactOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
