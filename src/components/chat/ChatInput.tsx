@@ -1,8 +1,9 @@
-import { Smile, Paperclip, Mic, Send, Image as ImageIcon, FileText, Sticker, Film, Video, Link as LinkIcon, X, MapPin, User, Users, ListOrdered, BadgeDollarSign } from 'lucide-react';
+import { Smile, Paperclip, Mic, Send, Image as ImageIcon, FileText, Sticker, Film, Video, Link as LinkIcon, X, MapPin, User, Users, ListOrdered, BadgeDollarSign, Square } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, FormEvent } from 'react';
 import { useChatStore } from '@/store/chatStore';
 import { prettyBytes } from '@/utils/media';
 import { LocationPickerModal } from '@/components/chat/LocationPickerModal';
+import { useAudioRecorder } from '@/hooks/useAudioRecorder';
 
 type MediaKind = 'image' | 'sticker' | 'gif' | 'audio' | 'video' | 'ptv' | 'document';
 
@@ -51,6 +52,9 @@ export function ChatInput() {
   const [pixType, setPixType] = useState<'EVP' | 'CPF' | 'CNPJ' | 'PHONE' | 'EMAIL'>('EVP');
   const [pixMerchantName, setPixMerchantName] = useState('');
 
+  const recorder = useAudioRecorder();
+  const [recordOpen, setRecordOpen] = useState(false);
+
   const fileInputs = {
     image: useRef<HTMLInputElement>(null),
     sticker: useRef<HTMLInputElement>(null),
@@ -73,6 +77,13 @@ export function ChatInput() {
   }, [attachOpen]);
 
   const canSend = message.trim().length > 0;
+
+  const fmtMs = (ms: number) => {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -233,6 +244,29 @@ export function ChatInput() {
     }
   };
 
+  const openRecorder = async () => {
+    setAttachOpen(false);
+    setRecordOpen(true);
+    await recorder.start();
+    if (recorder.error) window.alert(recorder.error);
+  };
+
+  const closeRecorder = () => {
+    setRecordOpen(false);
+    recorder.reset();
+  };
+
+  const sendRecordedAudio = async () => {
+    if (!recorder.file) return;
+    try {
+      await sendMedia('audio', { file: recorder.file, caption: '' });
+      closeRecorder();
+    } catch {
+      const msg = useChatStore.getState().error || 'Falha ao enviar';
+      window.alert(msg);
+    }
+  };
+
   const sendSelectedContact = async () => {
     try {
       await sendContact({ contactName, contactPhone });
@@ -378,7 +412,7 @@ export function ChatInput() {
             <Send size={24} />
           </button>
         ) : (
-          <button className="p-2 rounded-full hover:bg-gray-200 transition-colors">
+          <button type="button" onClick={openRecorder} className="p-2 rounded-full hover:bg-gray-200 transition-colors">
             <Mic size={24} />
           </button>
         )}
@@ -440,6 +474,52 @@ export function ChatInput() {
                   onClick={sendSelectedMedia}
                   className="mt-4 w-full h-[40px] rounded-full bg-[#00a884] text-white text-[14px] hover:brightness-95"
                 >
+                  Enviar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {recordOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+          <div className="w-[640px] max-w-[92vw] bg-white rounded-lg overflow-hidden shadow-xl">
+            <div className="h-[56px] px-4 flex items-center justify-between bg-wa-header">
+              <div className="text-[14px] text-wa-text">Gravar áudio</div>
+              <button type="button" onClick={closeRecorder} className="p-2 rounded-full hover:bg-gray-200 transition-colors">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-4">
+              <div className="flex items-center justify-between">
+                <div className="text-[13px] text-wa-muted">{fmtMs(recorder.elapsedMs)}</div>
+                {recorder.status === 'recording' ? (
+                  <button type="button" onClick={recorder.stop} className="h-[40px] px-4 rounded-full bg-[#d92929] text-white text-[14px] hover:brightness-95 flex items-center gap-2">
+                    <Square size={16} />
+                    Parar
+                  </button>
+                ) : (
+                  <button type="button" onClick={recorder.start} className="h-[40px] px-4 rounded-full bg-[#00a884] text-white text-[14px] hover:brightness-95 flex items-center gap-2">
+                    <Mic size={16} />
+                    Gravar
+                  </button>
+                )}
+              </div>
+
+              {recorder.error ? <div className="mt-3 text-[13px] text-[#d92929]">{recorder.error}</div> : null}
+
+              {recorder.audioUrl && recorder.status === 'ready' ? (
+                <div className="mt-4 border border-wa-border rounded-lg p-3">
+                  <audio src={recorder.audioUrl} controls className="w-full" />
+                </div>
+              ) : null}
+
+              <div className="mt-4 flex gap-2">
+                <button type="button" onClick={closeRecorder} className="flex-1 h-[40px] rounded-full bg-wa-header hover:bg-gray-200 text-[14px]">
+                  Cancelar
+                </button>
+                <button type="button" onClick={sendRecordedAudio} disabled={!recorder.file || recorder.status !== 'ready'} className="flex-1 h-[40px] rounded-full bg-[#00a884] text-white text-[14px] hover:brightness-95 disabled:opacity-40">
                   Enviar
                 </button>
               </div>
