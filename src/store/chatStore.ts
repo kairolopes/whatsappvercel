@@ -191,7 +191,7 @@ function preferMessage(a: Message, b: Message) {
   const aLocal = Boolean(a.local);
   const bLocal = Boolean(b.local);
   if (aLocal !== bLocal) {
-    return aLocal ? a : b;
+    return aLocal ? b : a;
   }
 
   if ((b.text?.length ?? 0) > (a.text?.length ?? 0)) return b;
