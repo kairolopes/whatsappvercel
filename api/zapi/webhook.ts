@@ -565,8 +565,8 @@ export default async function handler(req: any, res: any) {
   const timeString = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
   const msg = getWebhookMessageData(payload as any);
   const text = msg.text;
-  const contactName = (payload as any)?.contact?.displayName || phone;
-  const avatarUrl = (payload as any)?.photo || null;
+  const contactName = (payload as any)?.chatName || (payload as any)?.senderName || (payload as any)?.contact?.displayName || phone;
+  const avatarUrl = (payload as any)?.senderPhoto || (payload as any)?.photo || null;
 
   const { data: existingConv } = await supabase
     .from('conversations')
