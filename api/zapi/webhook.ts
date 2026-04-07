@@ -89,6 +89,133 @@ function normalizePhone(value: unknown): string {
   return digits || withoutAt;
 }
 
+function formatTimeHM(d: Date) {
+  const hh = d.getHours().toString().padStart(2, '0');
+  const mm = d.getMinutes().toString().padStart(2, '0');
+  return `${hh}:${mm}`;
+}
+
+function signedText(signatureName: string, message: string): string {
+  const base = String(message ?? '').trim();
+  const prefix = `*${signatureName}*`;
+  return base ? `${prefix}\n${base}` : prefix;
+}
+
+function getAiSignatureName(): string {
+  const s = String(process.env.MAKE_SIGNATURE_NAME || 'Síndico X').trim();
+  return s || 'Síndico X';
+}
+
+function shouldAutoReply(): boolean {
+  return String(process.env.AI_AUTOREPLY || '').trim().toLowerCase() === 'true';
+}
+
+function getAiModel(): string {
+  const m = String(process.env.AI_MODEL || '').trim();
+  return m || 'gpt-4o-mini';
+}
+
+function getOpenAiKey(): string {
+  return String(process.env.OPENAI_API_KEY || '').trim();
+}
+
+function getZapiConfig() {
+  const instanceId = process.env.ZAPI_INSTANCE_ID;
+  const token = process.env.ZAPI_TOKEN;
+  const clientToken = process.env.ZAPI_CLIENT_TOKEN;
+  if (!instanceId || !token || !clientToken) return null;
+  return { instanceId, token, clientToken };
+}
+
+async function zapiFetch(method: string, path: string, body?: any) {
+  const cfg = getZapiConfig();
+  if (!cfg) throw new Error('missing_zapi_env');
+  const baseUrl = `https://api.z-api.io/instances/${cfg.instanceId}/token/${cfg.token}`;
+  const url = `${baseUrl}${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      'Client-Token': cfg.clientToken,
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const contentType = res.headers.get('content-type') ?? '';
+  const data = contentType.includes('application/json') ? await res.json().catch(() => null) : await res.text().catch(() => null);
+  if (!res.ok) {
+    const err: any = new Error('zapi_error');
+    err.status = res.status;
+    err.details = data;
+    throw err;
+  }
+  return data;
+}
+
+function extractJsonObject(text: string) {
+  const s = String(text ?? '');
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) return null;
+  try {
+    return JSON.parse(s.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+}
+
+async function decideWithChatGpt(input: { phone: string; message: string }) {
+  const apiKey = getOpenAiKey();
+  if (!apiKey) return { action: 'none' as const };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const model = getAiModel();
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: 300,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Você é um roteador de atendimento via WhatsApp. Sua saída DEVE ser JSON. Escolha uma ação: "reply" (responder) ou "none" (não responder). Se responder, inclua "reply" com texto curto e educado. Nunca inclua markdown além de \"*negrito*\" do WhatsApp. Se não tiver certeza, use action="none".',
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              phone: input.phone,
+              message: input.message,
+            }),
+          },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    const json = await res.json().catch(() => null);
+    const content = String(json?.choices?.[0]?.message?.content ?? '');
+    const parsed = extractJsonObject(content);
+    const actionRaw = String((parsed as any)?.action ?? '').trim().toLowerCase();
+    if (actionRaw !== 'reply') return { action: 'none' as const };
+    const reply = String((parsed as any)?.reply ?? '').trim();
+    if (!reply) return { action: 'none' as const };
+    return { action: 'reply' as const, reply };
+  } catch {
+    return { action: 'none' as const };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function getWebhookMessageData(payload: any): { kind: string; text: string | null; meta: AnyRecord } {
   const rawText = payload?.text?.message ?? payload?.text ?? payload?.message;
   if (typeof rawText === 'string' && rawText.trim()) {
@@ -413,6 +540,36 @@ export default async function handler(req: any, res: any) {
         { onConflict: 'conversation_id,external_id' },
       );
     insertedMessage = true;
+  }
+
+  if (shouldAutoReply() && inferredFromMe === false && msg.kind === 'text' && typeof text === 'string' && text.trim()) {
+    const decision = await decideWithChatGpt({ phone, message: text.trim() });
+    if (decision.action === 'reply') {
+      const signature = getAiSignatureName();
+      const finalText = signedText(signature, decision.reply);
+      try {
+        const resp: any = await zapiFetch('POST', '/send-text', { phone, message: finalText });
+        const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+        await supabase.from('messages').insert([
+          {
+            conversation_id: upsertedConv.id,
+            text: finalText,
+            sender: 'user',
+            timestamp: formatTimeHM(new Date()),
+            status: 'sent',
+            external_id: externalId || null,
+            kind: 'text',
+            meta: { ai: true, model: getAiModel() },
+          },
+        ]);
+
+        await supabase
+          .from('conversations')
+          .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+          .eq('id', upsertedConv.id);
+      } catch {
+      }
+    }
   }
 
   res.status(200).json({ ok: true, stored: true, synced: true, insertedMessage, eventType, phone });
