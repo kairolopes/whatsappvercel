@@ -101,6 +101,25 @@ function signedText(signatureName: string, message: string): string {
   return base ? `${prefix}\n${base}` : prefix;
 }
 
+function isMenuChoice(text: string) {
+  const t = String(text || '').trim();
+  return t === '1' || t === '2' || t === '3' || t === '4';
+}
+
+function buildWelcomeMenu(params: { name: string; apartment: string; block: string }) {
+  const name = String(params.name || '').trim() || 'morador';
+  const apartment = String(params.apartment || '').trim();
+  const block = String(params.block || '').trim();
+  return (
+    `Olá, ${name}, sua conta está vinculada ao apartamento ${apartment}, Bloco ${block}, do CONDOMINIO CAMPOS ALTOS!\n\n` +
+    `Como posso te ajudar hoje?\n\n` +
+    `1 - Boletos a pagar;\n\n` +
+    `2 - Reserva de Ambientes;\n\n` +
+    `3 - Dúvidas sobre a Convenção e Regimento Interno;\n\n` +
+    `4 - Falar com a Administração;`
+  );
+}
+
 function getAiSignatureName(): string {
   const s = String(process.env.MAKE_SIGNATURE_NAME || 'Síndico X').trim();
   return s || 'Síndico X';
@@ -676,11 +695,16 @@ export default async function handler(req: any, res: any) {
     const signature = getAiSignatureName();
     let isNewClient = false;
     let needsLookup = false;
+    let clientUnitId = '';
+    let clientBlock = '';
+    let clientApartment = '';
+    let lastAutoReplyTo = '';
+    let lastAutoReplyAt: string | null = null;
 
     try {
       const { data: existingClient } = await supabase
         .from('clients')
-        .select('phone,status,matched,unit_id,block,apartment')
+        .select('phone,status,matched,unit_id,block,apartment,last_auto_reply_to,last_auto_reply_at')
         .eq('phone', phoneDigits)
         .maybeSingle();
 
@@ -702,6 +726,11 @@ export default async function handler(req: any, res: any) {
         const hasBlock = Boolean(String((existingClient as any)?.block ?? '').trim());
         const hasApartment = Boolean(String((existingClient as any)?.apartment ?? '').trim());
         needsLookup = !matched || !hasBlock || !hasApartment;
+        clientUnitId = String((existingClient as any)?.unit_id ?? '').trim();
+        clientBlock = String((existingClient as any)?.block ?? '').trim();
+        clientApartment = String((existingClient as any)?.apartment ?? '').trim();
+        lastAutoReplyTo = String((existingClient as any)?.last_auto_reply_to ?? '').trim();
+        lastAutoReplyAt = (existingClient as any)?.last_auto_reply_at ?? null;
         await supabase
           .from('clients')
           .update({ whatsapp_name: contactName, whatsapp_photo_url: avatarUrl })
@@ -734,68 +763,76 @@ export default async function handler(req: any, res: any) {
                 .eq('phone', phoneDigits);
             } catch {
             }
-
-            const parts: string[] = [];
-            if (apartment) parts.push(`apartamento ${apartment}`);
-            if (block) parts.push(`bloco ${block}`);
-            const location = parts.length ? parts.join(', ') : 'sua unidade';
-            const unitLine = unitId ? `\nUnidade: ${unitId}` : '';
-            const reply = signedText(signature, `Olá, ${contactName}. Sua conta está vinculada a: ${location}.${unitLine}`);
-
-            try {
-              const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: reply });
-              const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
-              await supabase.from('messages').insert([
-                {
-                  conversation_id: upsertedConv.id,
-                  text: reply,
-                  sender: 'user',
-                  timestamp: formatTimeHM(new Date()),
-                  status: 'sent',
-                  external_id: externalId || null,
-                  kind: 'text',
-                  meta: { superlogica: true, unit_id: unitId || null, block: block || null, apartment: apartment || null },
-                },
-              ]);
-
-              await supabase
-                .from('conversations')
-                .update({ last_message: reply, last_message_time: formatTimeHM(new Date()) })
-                .eq('id', upsertedConv.id);
-            } catch {
-            }
-
-            handledByLookup = true;
+            clientUnitId = unitId;
+            clientBlock = block;
+            clientApartment = apartment;
           } else if (isNewClient) {
-            const reply = signedText(
-              signature,
-              `Olá, ${contactName}. Não encontrei seu cadastro pelo final do seu telefone. Me informe seu bloco e apartamento para eu vincular seu acesso.`,
-            );
-
-            try {
-              const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: reply });
-              const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
-              await supabase.from('messages').insert([
-                {
-                  conversation_id: upsertedConv.id,
-                  text: reply,
-                  sender: 'user',
-                  timestamp: formatTimeHM(new Date()),
-                  status: 'sent',
-                  external_id: externalId || null,
-                  kind: 'text',
-                  meta: { superlogica: true, not_found: true },
-                },
-              ]);
-              await supabase
-                .from('conversations')
-                .update({ last_message: reply, last_message_time: formatTimeHM(new Date()) })
-                .eq('id', upsertedConv.id);
-            } catch {
-            }
-
-            handledByLookup = true;
           }
+        } catch {
+        }
+      }
+    }
+
+    const shouldSendMenu =
+      shouldAutoReply() &&
+      msg.kind === 'text' &&
+      typeof text === 'string' &&
+      text.trim() &&
+      !isMenuChoice(text.trim());
+
+    if (shouldSendMenu) {
+      const now = Date.now();
+      const lastAtMs = lastAutoReplyAt ? Date.parse(String(lastAutoReplyAt)) : NaN;
+      const tooSoon = Number.isFinite(lastAtMs) ? now - lastAtMs < 5000 : false;
+      const sameMessage = Boolean(messageId) && Boolean(lastAutoReplyTo) && lastAutoReplyTo === String(messageId);
+
+      if (!tooSoon && !sameMessage) {
+        let replyBody = '';
+
+        if (!clientApartment || !clientBlock) {
+          replyBody = `Olá, ${contactName}. Não consegui identificar seu apartamento e bloco automaticamente. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
+        } else {
+          replyBody = buildWelcomeMenu({ name: contactName, apartment: clientApartment, block: clientBlock });
+        }
+
+        const finalText = signedText(signature, replyBody);
+
+        try {
+          const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+
+          await supabase.from('messages').insert([
+            {
+              conversation_id: upsertedConv.id,
+              text: finalText,
+              sender: 'user',
+              timestamp: formatTimeHM(new Date()),
+              status: 'sent',
+              external_id: externalId || null,
+              kind: 'text',
+              meta: {
+                ai: true,
+                ai_welcome: true,
+                auto_reply_to: messageId || null,
+                superlogica: true,
+                unit_id: clientUnitId || null,
+                block: clientBlock || null,
+                apartment: clientApartment || null,
+              },
+            },
+          ]);
+
+          await supabase
+            .from('conversations')
+            .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+            .eq('id', upsertedConv.id);
+
+          await supabase
+            .from('clients')
+            .update({ last_auto_reply_at: new Date().toISOString(), last_auto_reply_to: messageId || null })
+            .eq('phone', phoneDigits);
+
+          handledByLookup = true;
         } catch {
         }
       }
