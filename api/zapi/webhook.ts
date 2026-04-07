@@ -163,6 +163,132 @@ function extractJsonObject(text: string) {
   }
 }
 
+function getSuperlogicaConfig() {
+  const appToken = String(process.env.SUPERLOGICA_APP_TOKEN || '').trim();
+  const accessToken = String(process.env.SUPERLOGICA_ACCESS_TOKEN || '').trim();
+  const condominioId = String(process.env.SUPERLOGICA_CONDOMINIO_ID || '47').trim();
+  const pages = Number(process.env.SUPERLOGICA_PAGES || '5');
+  if (!appToken || !accessToken || !condominioId) return null;
+  return { appToken, accessToken, condominioId, pages: Number.isFinite(pages) && pages > 0 ? pages : 5 };
+}
+
+async function fetchSuperlogicaPage(page: number) {
+  const cfg = getSuperlogicaConfig();
+  if (!cfg) throw new Error('missing_superlogica_env');
+
+  const url = `https://api.superlogica.net/v2/condor/unidades/index?idCondominio=${encodeURIComponent(cfg.condominioId)}&exibirGruposDasUnidades=1&itensPorPagina=50&pagina=${encodeURIComponent(String(page))}&exibirDadosDosContatos=1`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        app_token: cfg.appToken,
+        access_token: cfg.accessToken,
+      } as any,
+      signal: controller.signal,
+    });
+
+    const contentType = res.headers.get('content-type') ?? '';
+    const data = contentType.includes('application/json') ? await res.json().catch(() => null) : await res.text().catch(() => null);
+    if (!res.ok) {
+      const err: any = new Error('superlogica_error');
+      err.status = res.status;
+      err.details = data;
+      throw err;
+    }
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeDigits(value: unknown): string {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
+function collectDigitsFromUnknown(value: unknown, out: Set<string>) {
+  if (typeof value === 'string') {
+    const digits = normalizeDigits(value);
+    if (digits.length >= 8 && digits.length <= 16) out.add(digits);
+    return;
+  }
+  if (typeof value === 'number') {
+    const digits = normalizeDigits(String(value));
+    if (digits.length >= 8 && digits.length <= 16) out.add(digits);
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const v of value) collectDigitsFromUnknown(v, out);
+    return;
+  }
+  const rec = value as Record<string, unknown>;
+  for (const v of Object.values(rec)) collectDigitsFromUnknown(v, out);
+}
+
+function findValueByKeys(root: any, keys: string[]): string {
+  const want = new Set(keys.map((k) => k.toLowerCase()));
+  const stack: any[] = [root];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || typeof cur !== 'object') continue;
+    if (Array.isArray(cur)) {
+      for (const v of cur) stack.push(v);
+      continue;
+    }
+    for (const [k, v] of Object.entries(cur as Record<string, unknown>)) {
+      if (want.has(k.toLowerCase())) {
+        const s = String(v ?? '').trim();
+        if (s) return s;
+      }
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+  return '';
+}
+
+function findMatchInSuperlogicaPayload(payload: any, last5: string) {
+  const stack: any[] = [payload];
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || typeof cur !== 'object') continue;
+    if (Array.isArray(cur)) {
+      for (const v of cur) stack.push(v);
+      continue;
+    }
+
+    const phones = new Set<string>();
+    collectDigitsFromUnknown(cur, phones);
+    for (const p of phones) {
+      if (p.endsWith(last5)) {
+        const unitId = findValueByKeys(cur, ['id_unidade_uni', 'idUnidadeUni', 'id_unidade']);
+        const block = findValueByKeys(cur, ['bloco', 'bloco_uni', 'blocoUnidade', 'bloco_unidade']);
+        const apartment = findValueByKeys(cur, ['apartamento', 'apto', 'unidade', 'numero', 'numero_apartamento', 'apartment']);
+        return { unitId, block, apartment, raw: cur };
+      }
+    }
+
+    for (const v of Object.values(cur as Record<string, unknown>)) {
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+  return null;
+}
+
+async function findUnitByPhoneLast5(last5: string) {
+  const cfg = getSuperlogicaConfig();
+  if (!cfg) throw new Error('missing_superlogica_env');
+  const pages = Math.min(20, Math.max(1, cfg.pages));
+  for (let page = 1; page <= pages; page += 1) {
+    const data = await fetchSuperlogicaPage(page);
+    const match = findMatchInSuperlogicaPayload(data, last5);
+    if (match) return match;
+  }
+  return null;
+}
+
 async function decideWithChatGpt(input: { phone: string; message: string }) {
   const apiKey = getOpenAiKey();
   if (!apiKey) return { action: 'none' as const };
@@ -542,7 +668,140 @@ export default async function handler(req: any, res: any) {
     insertedMessage = true;
   }
 
-  if (shouldAutoReply() && inferredFromMe === false && msg.kind === 'text' && typeof text === 'string' && text.trim()) {
+  let handledByLookup = false;
+
+  if (inferredFromMe === false) {
+    const phoneDigits = normalizeDigits(phone);
+    const isPhoneNumber = phoneDigits.length >= 10;
+    const signature = getAiSignatureName();
+    let isNewClient = false;
+    let alreadyMatched = false;
+
+    try {
+      const { data: existingClient } = await supabase
+        .from('clients')
+        .select('phone,status,matched,unit_id,block,apartment')
+        .eq('phone', phoneDigits)
+        .maybeSingle();
+
+      if (!existingClient) {
+        isNewClient = true;
+        await supabase.from('clients').insert([
+          {
+            phone: phoneDigits,
+            status: 2,
+            whatsapp_name: contactName,
+            whatsapp_photo_url: avatarUrl,
+            matched: false,
+            match_payload: {},
+          },
+        ]);
+      } else {
+        alreadyMatched = Boolean((existingClient as any)?.matched) || Number((existingClient as any)?.status) === 1;
+        await supabase
+          .from('clients')
+          .update({ whatsapp_name: contactName, whatsapp_photo_url: avatarUrl })
+          .eq('phone', phoneDigits);
+      }
+    } catch {
+    }
+
+    if (isPhoneNumber && !alreadyMatched) {
+      const last5 = phoneDigits.slice(-5);
+      if (last5.length === 5) {
+        try {
+          const match = await findUnitByPhoneLast5(last5);
+          if (match) {
+            const unitId = String(match.unitId || '').trim();
+            const block = String(match.block || '').trim();
+            const apartment = String(match.apartment || '').trim();
+
+            try {
+              await supabase
+                .from('clients')
+                .update({
+                  status: 1,
+                  matched: true,
+                  unit_id: unitId || null,
+                  block: block || null,
+                  apartment: apartment || null,
+                  match_payload: match.raw ?? {},
+                })
+                .eq('phone', phoneDigits);
+            } catch {
+            }
+
+            const parts: string[] = [];
+            if (apartment) parts.push(`apartamento ${apartment}`);
+            if (block) parts.push(`bloco ${block}`);
+            const location = parts.length ? parts.join(', ') : 'sua unidade';
+            const unitLine = unitId ? `\nUnidade: ${unitId}` : '';
+            const reply = signedText(
+              signature,
+              `Olá, ${contactName}. Sua conta está vinculada ao ${location}.${unitLine}`,
+            );
+
+            try {
+              const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: reply });
+              const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+              await supabase.from('messages').insert([
+                {
+                  conversation_id: upsertedConv.id,
+                  text: reply,
+                  sender: 'user',
+                  timestamp: formatTimeHM(new Date()),
+                  status: 'sent',
+                  external_id: externalId || null,
+                  kind: 'text',
+                  meta: { superlogica: true, unit_id: unitId || null, block: block || null, apartment: apartment || null },
+                },
+              ]);
+
+              await supabase
+                .from('conversations')
+                .update({ last_message: reply, last_message_time: formatTimeHM(new Date()) })
+                .eq('id', upsertedConv.id);
+            } catch {
+            }
+
+            handledByLookup = true;
+          } else if (isNewClient) {
+            const reply = signedText(
+              signature,
+              `Olá, ${contactName}. Não encontrei seu cadastro pelo final do seu telefone. Me informe seu bloco e apartamento para eu vincular seu acesso.`,
+            );
+
+            try {
+              const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: reply });
+              const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+              await supabase.from('messages').insert([
+                {
+                  conversation_id: upsertedConv.id,
+                  text: reply,
+                  sender: 'user',
+                  timestamp: formatTimeHM(new Date()),
+                  status: 'sent',
+                  external_id: externalId || null,
+                  kind: 'text',
+                  meta: { superlogica: true, not_found: true },
+                },
+              ]);
+              await supabase
+                .from('conversations')
+                .update({ last_message: reply, last_message_time: formatTimeHM(new Date()) })
+                .eq('id', upsertedConv.id);
+            } catch {
+            }
+
+            handledByLookup = true;
+          }
+        } catch {
+        }
+      }
+    }
+  }
+
+  if (!handledByLookup && shouldAutoReply() && inferredFromMe === false && msg.kind === 'text' && typeof text === 'string' && text.trim()) {
     const decision = await decideWithChatGpt({ phone, message: text.trim() });
     if (decision.action === 'reply') {
       const signature = getAiSignatureName();
