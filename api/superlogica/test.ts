@@ -7,20 +7,26 @@ function json(res: AnyRes, status: number, body: unknown) {
   res.status(status).json(body);
 }
 
-function timingSafeEqual(a: string, b: string) {
-  const ab = Buffer.from(String(a ?? ''), 'utf8');
-  const bb = Buffer.from(String(b ?? ''), 'utf8');
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
+function digest(value: string) {
+  return crypto.createHash('sha256').update(String(value ?? ''), 'utf8').digest();
 }
 
-function getAuthSecret(): string {
-  return (
-    process.env.ADMIN_API_KEY ||
-    process.env.ZAPI_WEBHOOK_SECRET ||
-    process.env.MAKE_WEBHOOK_SECRET ||
-    'rokzap_2026_03_29_a8d2b7c1f4e9'
-  );
+function safeEquals(a: string, b: string) {
+  const da = digest(a);
+  const db = digest(b);
+  return crypto.timingSafeEqual(da, db);
+}
+
+function getAuthSecrets(): string[] {
+  const values = [
+    process.env.ADMIN_API_KEY,
+    process.env.ZAPI_WEBHOOK_SECRET,
+    process.env.MAKE_WEBHOOK_SECRET,
+    'rokzap_2026_03_29_a8d2b7c1f4e9',
+  ]
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean);
+  return Array.from(new Set(values));
 }
 
 function getReqSecret(req: AnyReq): string {
@@ -44,9 +50,10 @@ export default async function handler(req: AnyReq, res: AnyRes) {
     return;
   }
 
-  const expected = getAuthSecret();
+  const expected = getAuthSecrets();
   const received = getReqSecret(req);
-  if (!received || !timingSafeEqual(received, expected)) {
+  const authed = Boolean(received) && expected.some((s) => safeEquals(received, s));
+  if (!authed) {
     json(res, 401, { ok: false, reason: 'unauthorized' });
     return;
   }
@@ -89,4 +96,3 @@ export default async function handler(req: AnyReq, res: AnyRes) {
     clearTimeout(timeout);
   }
 }
-
