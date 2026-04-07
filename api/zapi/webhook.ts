@@ -675,7 +675,7 @@ export default async function handler(req: any, res: any) {
     const isPhoneNumber = phoneDigits.length >= 10;
     const signature = getAiSignatureName();
     let isNewClient = false;
-    let alreadyMatched = false;
+    let needsLookup = false;
 
     try {
       const { data: existingClient } = await supabase
@@ -686,6 +686,7 @@ export default async function handler(req: any, res: any) {
 
       if (!existingClient) {
         isNewClient = true;
+        needsLookup = true;
         await supabase.from('clients').insert([
           {
             phone: phoneDigits,
@@ -697,7 +698,10 @@ export default async function handler(req: any, res: any) {
           },
         ]);
       } else {
-        alreadyMatched = Boolean((existingClient as any)?.matched) || Number((existingClient as any)?.status) === 1;
+        const matched = Boolean((existingClient as any)?.matched) || Number((existingClient as any)?.status) === 1;
+        const hasBlock = Boolean(String((existingClient as any)?.block ?? '').trim());
+        const hasApartment = Boolean(String((existingClient as any)?.apartment ?? '').trim());
+        needsLookup = !matched || !hasBlock || !hasApartment;
         await supabase
           .from('clients')
           .update({ whatsapp_name: contactName, whatsapp_photo_url: avatarUrl })
@@ -706,7 +710,7 @@ export default async function handler(req: any, res: any) {
     } catch {
     }
 
-    if (isPhoneNumber && !alreadyMatched) {
+    if (isPhoneNumber && needsLookup) {
       const last5 = phoneDigits.slice(-5);
       if (last5.length === 5) {
         try {
