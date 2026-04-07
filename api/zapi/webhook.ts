@@ -264,8 +264,8 @@ function findMatchInSuperlogicaPayload(payload: any, last5: string) {
     for (const p of phones) {
       if (p.endsWith(last5)) {
         const unitId = findValueByKeys(cur, ['id_unidade_uni', 'idUnidadeUni', 'id_unidade']);
-        const block = findValueByKeys(cur, ['bloco', 'bloco_uni', 'blocoUnidade', 'bloco_unidade']);
-        const apartment = findValueByKeys(cur, ['apartamento', 'apto', 'unidade', 'numero', 'numero_apartamento', 'apartment']);
+        const block = findValueByKeys(cur, ['st_bloco_uni', 'bloco', 'bloco_uni', 'blocoUnidade', 'bloco_unidade', 'st_grupo_ugbu']);
+        const apartment = findValueByKeys(cur, ['st_unidade_uni', 'apartamento', 'apto', 'unidade', 'numero', 'numero_apartamento', 'apartment', 'st_identificacao_uni']);
         return { unitId, block, apartment, raw: cur };
       }
     }
@@ -736,10 +736,7 @@ export default async function handler(req: any, res: any) {
             if (block) parts.push(`bloco ${block}`);
             const location = parts.length ? parts.join(', ') : 'sua unidade';
             const unitLine = unitId ? `\nUnidade: ${unitId}` : '';
-            const reply = signedText(
-              signature,
-              `Olá, ${contactName}. Sua conta está vinculada ao ${location}.${unitLine}`,
-            );
+            const reply = signedText(signature, `Olá, ${contactName}. Sua conta está vinculada a: ${location}.${unitLine}`);
 
             try {
               const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: reply });
