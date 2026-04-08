@@ -126,6 +126,32 @@ function isBoletoIntent(text: string) {
   return false;
 }
 
+function parseBoletoSelection(text: string): number | null {
+  const s = simplifyText(text);
+  if (!s) return null;
+
+  const m1 = s.match(/^boleto\s+(\d{1,2})$/);
+  if (m1) return Number(m1[1]);
+
+  const m2 = s.match(/^(\d{1,2})\s*(via|segunda via|2 via)?\s*boleto$/);
+  if (m2) return Number(m2[1]);
+
+  const m3 = s.match(/^(segunda via|2 via)\s+(\d{1,2})$/);
+  if (m3) return Number(m3[2]);
+
+  return null;
+}
+
+function getBoletoCategory(text: string): 'vencidos' | 'avencer' | 'acordos' | 'todos' | null {
+  const s = simplifyText(text);
+  if (!s) return null;
+  if (s.includes('vencid')) return 'vencidos';
+  if (s.includes('a vencer') || s.includes('avencer') || s.includes('futuro') || s.includes('proximo')) return 'avencer';
+  if (s.includes('acordo') || s.includes('parcel')) return 'acordos';
+  if (s.includes('todos') || s.includes('tudo')) return 'todos';
+  return null;
+}
+
 function isReservaIntent(text: string) {
   const s = simplifyText(text);
   if (!s) return false;
@@ -328,6 +354,34 @@ async function fetchSuperlogicaCobranca(unitId: string) {
   }
 }
 
+function parseSuperlogicaDate(input: string | undefined) {
+  const raw = String(input || '').trim();
+  if (!raw) return null;
+  const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if (!m) return null;
+  const dd = Number(m[1]);
+  const mm = Number(m[2]);
+  const yyyy = Number(m[3]);
+  if (!dd || !mm || !yyyy) return null;
+  const d = new Date(Date.UTC(yyyy, mm - 1, dd, 0, 0, 0));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function isAgreementRecebimento(item: any) {
+  const idAcordo = String(item?.id_acordo_recb ?? '').trim();
+  if (idAcordo) return true;
+  const parc = String(item?.fl_parcelamento_recb ?? '').trim();
+  if (parc && parc !== '0') return true;
+  const keys = Object.keys(item || {});
+  for (const k of keys) {
+    const v = item[k];
+    if (typeof v !== 'string') continue;
+    const s = simplifyText(v);
+    if (s.includes('acordo') || s.includes('parcel') || s.includes('negoci')) return true;
+  }
+  return false;
+}
+
 function collectRecebimentos(payload: any) {
   const out: { id: string; due?: string; amount?: string }[] = [];
   const seen = new Set<string>();
@@ -346,10 +400,36 @@ function collectRecebimentos(payload: any) {
     if (id && !seen.has(id)) {
       seen.add(id);
       const due = String(rec.dt_vencimento_recb ?? rec.dt_vencimento ?? '').trim() || undefined;
-      const amount = String(rec.vl_valor_recb ?? rec.vl_valor ?? '').trim() || undefined;
+      const amount = String(rec.vl_total_recb ?? rec.vl_valor_recb ?? rec.vl_valor ?? '').trim() || undefined;
       out.push({ id, due, amount });
     }
 
+    for (const v of Object.values(rec)) {
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+
+  return out;
+}
+
+function collectRecebimentoItems(payload: any) {
+  const out: any[] = [];
+  const seen = new Set<string>();
+  const stack: any[] = [payload];
+
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || typeof cur !== 'object') continue;
+    if (Array.isArray(cur)) {
+      for (const v of cur) stack.push(v);
+      continue;
+    }
+    const rec = cur as Record<string, any>;
+    const id = String(rec.id_recebimento_recb ?? '').trim();
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      out.push(cur);
+    }
     for (const v of Object.values(rec)) {
       if (v && typeof v === 'object') stack.push(v);
     }
@@ -879,11 +959,13 @@ export default async function handler(req: any, res: any) {
     let clientApartment = '';
     let lastAutoReplyTo = '';
     let lastAutoReplyAt: string | null = null;
+    let lastBoletoList: any[] = [];
+    let lastBoletoListAt: string | null = null;
 
     try {
       const { data: existingClient } = await supabase
         .from('clients')
-        .select('phone,status,matched,unit_id,block,apartment,last_auto_reply_to,last_auto_reply_at')
+        .select('phone,status,matched,unit_id,block,apartment,last_auto_reply_to,last_auto_reply_at,last_boleto_list,last_boleto_list_at')
         .eq('phone', phoneDigits)
         .maybeSingle();
 
@@ -910,6 +992,9 @@ export default async function handler(req: any, res: any) {
         clientApartment = String((existingClient as any)?.apartment ?? '').trim();
         lastAutoReplyTo = String((existingClient as any)?.last_auto_reply_to ?? '').trim();
         lastAutoReplyAt = (existingClient as any)?.last_auto_reply_at ?? null;
+        const boletoListRaw = (existingClient as any)?.last_boleto_list;
+        lastBoletoList = Array.isArray(boletoListRaw) ? boletoListRaw : [];
+        lastBoletoListAt = (existingClient as any)?.last_boleto_list_at ?? null;
         await supabase
           .from('clients')
           .update({ whatsapp_name: senderDisplayName, whatsapp_photo_url: avatarUrl })
@@ -980,77 +1065,162 @@ export default async function handler(req: any, res: any) {
 
         handledByLookup = true;
       } else {
+        const selection = parseBoletoSelection(incomingText);
+        const category = getBoletoCategory(incomingText);
+        const nowIso = new Date().toISOString();
+
         try {
-          const cobranca = await fetchSuperlogicaCobranca(clientUnitId);
-          const recebimentos = collectRecebimentos(cobranca);
-          const picked = recebimentos.slice(0, 3);
-          if (picked.length === 0) {
-            const replyBody = `Olá, ${senderDisplayName}. Não encontrei boletos para sua unidade no momento.`;
-            const finalText = signedText(signature, replyBody);
-            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
-            await supabase.from('messages').insert([
-              {
-                conversation_id: upsertedConv.id,
-                text: finalText,
-                sender: 'user',
-                timestamp: formatTimeHM(new Date()),
-                status: 'sent',
-                external_id: externalId || null,
-                kind: 'text',
-                meta: { superlogica: true, action: 'boleto', unit_id: clientUnitId },
-              },
-            ]);
-            await supabase
-              .from('conversations')
-              .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-              .eq('id', upsertedConv.id);
-          } else {
-            const links: { id: string; link: string; due?: string; amount?: string }[] = [];
-            for (const r of picked) {
-              const link = await fetchSuperlogicaSegundaViaLink(r.id);
-              if (link) links.push({ id: r.id, link, due: r.due, amount: r.amount });
-            }
-
-            const lines: string[] = [];
-            if (links.length === 0) {
-              lines.push('Não consegui gerar o link da 2ª via agora.');
-            } else if (links.length === 1) {
-              lines.push(`Segue a 2ª via do boleto:`);
-              lines.push(links[0].link);
+          if (selection !== null) {
+            const ttlMs = 30 * 60 * 1000;
+            const listAtMs = lastBoletoListAt ? Date.parse(String(lastBoletoListAt)) : NaN;
+            const listValid = Array.isArray(lastBoletoList) && lastBoletoList.length > 0 && Number.isFinite(listAtMs) && Date.now() - listAtMs < ttlMs;
+            if (!listValid) {
+              const finalText = signedText(
+                signature,
+                `Para eu emitir a 2ª via, primeiro peça uma lista: "boletos vencidos", "boletos a vencer" ou "acordos". Depois responda "boleto 1", "boleto 2", etc.`,
+              );
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+              handledByLookup = true;
             } else {
-              lines.push('Seguem as 2ª vias dos seus boletos:');
-              links.forEach((l, idx) => {
-                const extra = [l.due ? `venc. ${l.due}` : '', l.amount ? `valor ${l.amount}` : ''].filter(Boolean).join(' · ');
-                lines.push(`${idx + 1}) ${extra ? `${extra} — ` : ''}${l.link}`);
-              });
+              const idx = selection - 1;
+              const entry = lastBoletoList[idx];
+              const recbId = String(entry?.id ?? '').trim();
+              if (!recbId) {
+                const finalText = signedText(signature, `Não encontrei o boleto ${selection}. Peça novamente a lista de boletos.`);
+                await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+                handledByLookup = true;
+              } else {
+                const link = await fetchSuperlogicaSegundaViaLink(recbId);
+                const finalText = signedText(signature, link ? `Segue a 2ª via do boleto ${selection}:\n${link}` : 'Não consegui gerar o link da 2ª via agora.');
+                const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+                const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+                await supabase.from('messages').insert([
+                  {
+                    conversation_id: upsertedConv.id,
+                    text: finalText,
+                    sender: 'user',
+                    timestamp: formatTimeHM(new Date()),
+                    status: 'sent',
+                    external_id: externalId || null,
+                    kind: 'text',
+                    meta: { superlogica: true, action: 'boleto_segundavia', unit_id: clientUnitId, id_recebimento_recb: recbId },
+                  },
+                ]);
+                await supabase
+                  .from('conversations')
+                  .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+                  .eq('id', upsertedConv.id);
+                await supabase
+                  .from('clients')
+                  .update({ last_auto_reply_at: nowIso, last_auto_reply_to: messageId || null })
+                  .eq('phone', phoneDigits);
+                handledByLookup = true;
+              }
             }
+          } else {
+            const cobranca = await fetchSuperlogicaCobranca(clientUnitId);
+            const items = collectRecebimentoItems(cobranca);
+            const today = new Date();
+            const todayStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate(), 0, 0, 0));
 
-            const finalText = signedText(signature, lines.join('\n'));
-            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
-            await supabase.from('messages').insert([
-              {
-                conversation_id: upsertedConv.id,
-                text: finalText,
-                sender: 'user',
-                timestamp: formatTimeHM(new Date()),
-                status: 'sent',
-                external_id: externalId || null,
-                kind: 'text',
-                meta: { superlogica: true, action: 'boleto', unit_id: clientUnitId, links },
-              },
-            ]);
-            await supabase
-              .from('conversations')
-              .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-              .eq('id', upsertedConv.id);
+            const normalized = items
+              .map((it: any) => {
+                const id = String(it?.id_recebimento_recb ?? '').trim();
+                if (!id) return null;
+                const dueRaw = String(it?.dt_vencimento_recb ?? '').trim();
+                const due = dueRaw ? dueRaw.slice(0, 10) : '';
+                const dueDate = parseSuperlogicaDate(due);
+                const amount = String(it?.vl_total_recb ?? it?.vl_valor_recb ?? '').trim();
+                const inad = String(it?.fl_inadimplente_recb ?? '').trim();
+                const isOverdue = (dueDate ? dueDate.getTime() < todayStart.getTime() : false) || inad === '1';
+                const isAgreement = isAgreementRecebimento(it);
+                return { id, due, dueDate: dueDate ? dueDate.getTime() : null, amount, isOverdue, isAgreement };
+              })
+              .filter(Boolean) as any[];
+
+            let filtered = normalized;
+            if (category === 'vencidos') filtered = normalized.filter((x) => x.isOverdue && !x.isAgreement);
+            else if (category === 'avencer') filtered = normalized.filter((x) => !x.isOverdue && !x.isAgreement);
+            else if (category === 'acordos') filtered = normalized.filter((x) => x.isAgreement);
+
+            filtered.sort((a, b) => {
+              const ad = a.dueDate ?? Number.POSITIVE_INFINITY;
+              const bd = b.dueDate ?? Number.POSITIVE_INFINITY;
+              if (ad !== bd) return ad - bd;
+              return String(a.id).localeCompare(String(b.id));
+            });
+
+            const limit = Math.max(1, Math.min(20, Number(process.env.BOLETO_LIST_LIMIT || '8') || 8));
+            const list = filtered.slice(0, limit);
+
+            if (list.length === 0) {
+              const finalText = signedText(signature, `Olá, ${senderDisplayName}. Não encontrei boletos${category ? ` (${category})` : ''} para sua unidade no momento.`);
+              const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+              const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+              await supabase.from('messages').insert([
+                {
+                  conversation_id: upsertedConv.id,
+                  text: finalText,
+                  sender: 'user',
+                  timestamp: formatTimeHM(new Date()),
+                  status: 'sent',
+                  external_id: externalId || null,
+                  kind: 'text',
+                  meta: { superlogica: true, action: 'boleto_list', unit_id: clientUnitId, category: category || 'padrao' },
+                },
+              ]);
+              handledByLookup = true;
+            } else {
+              const title =
+                category === 'vencidos'
+                  ? 'Boletos vencidos'
+                  : category === 'avencer'
+                    ? 'Boletos a vencer'
+                    : category === 'acordos'
+                      ? 'Acordos/parcelamentos'
+                      : 'Boletos';
+
+              const lines: string[] = [];
+              lines.push(`${title} (mostrando ${list.length}):`);
+              list.forEach((b, i) => {
+                const extra = [b.due ? `venc. ${b.due}` : '', b.amount ? `valor ${b.amount}` : '', b.isAgreement ? 'acordo' : '']
+                  .filter(Boolean)
+                  .join(' · ');
+                lines.push(`${i + 1}) ${extra}`.trim());
+              });
+              lines.push('');
+              lines.push('Responda com "boleto N" para eu enviar a 2ª via (ex: "boleto 1").');
+              lines.push('Você também pode pedir: "boletos vencidos", "boletos a vencer", "acordos" ou "boletos todos".');
+
+              const finalText = signedText(signature, lines.join('\n'));
+              const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+              const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+
+              await supabase
+                .from('clients')
+                .update({ last_boleto_list: list, last_boleto_list_at: nowIso, last_auto_reply_at: nowIso, last_auto_reply_to: messageId || null })
+                .eq('phone', phoneDigits);
+
+              await supabase.from('messages').insert([
+                {
+                  conversation_id: upsertedConv.id,
+                  text: finalText,
+                  sender: 'user',
+                  timestamp: formatTimeHM(new Date()),
+                  status: 'sent',
+                  external_id: externalId || null,
+                  kind: 'text',
+                  meta: { superlogica: true, action: 'boleto_list', unit_id: clientUnitId, category: category || 'padrao' },
+                },
+              ]);
+              await supabase
+                .from('conversations')
+                .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+                .eq('id', upsertedConv.id);
+
+              handledByLookup = true;
+            }
           }
-
-          await supabase
-            .from('clients')
-            .update({ last_auto_reply_at: new Date().toISOString(), last_auto_reply_to: messageId || null })
-            .eq('phone', phoneDigits);
         } catch {
           const replyBody = `Olá, ${senderDisplayName}. Tive um problema ao consultar seus boletos agora. Tente novamente em instantes.`;
           const finalText = signedText(signature, replyBody);
@@ -1075,9 +1245,8 @@ export default async function handler(req: any, res: any) {
               .eq('id', upsertedConv.id);
           } catch {
           }
+          handledByLookup = true;
         }
-
-        handledByLookup = true;
       }
     }
 
