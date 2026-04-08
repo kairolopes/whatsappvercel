@@ -76,7 +76,7 @@ function extractPreferredName(input: string, allowSingleWord: boolean) {
   const m = s.match(/\b(meu nome e|meu nome é|eu sou|pode me chamar de|chama(\-)?me de)\s+(.{2,40})$/i);
   const simplified = simplifyText(s);
   const greetings = new Set(['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite']);
-  if (!m && (greetings.has(simplified) || simplified.length < 4)) return '';
+  if (!m && (greetings.has(simplified) || (!allowSingleWord && simplified.length < 4))) return '';
 
   const candidate = (m ? m[3] : s).trim();
   const cleaned = candidate
