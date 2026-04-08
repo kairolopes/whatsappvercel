@@ -2313,7 +2313,9 @@ export default async function handler(req: any, res: any) {
       const prompt =
         'Claro — me diga qual é a sua dúvida sobre a Convenção ou o Regimento Interno.\n\n' +
         'Você pode digitar ou enviar um áudio.\n\n' +
-        'Se puder, informe: qual tema (barulho, obra, pet, vaga, piscina, multa, etc.) e o que aconteceu. Eu vou confirmar se entendi antes de responder.';
+        'Se puder, informe: qual tema (barulho, obra, pet, vaga, piscina, multa, etc.) e o que aconteceu.\n\n' +
+        'Se não for dúvida sobre regras do condomínio, você pode escolher uma opção: \n\n' +
+        buildOptionsMenu();
       const finalText = signedText(signature, prompt);
 
       try {
