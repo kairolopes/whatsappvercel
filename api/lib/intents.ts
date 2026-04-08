@@ -45,20 +45,22 @@ function isReservaIntent(text: string) {
 function isRegimentoIntent(text: string) {
   const s = simplifyText(text);
   if (!s) return false;
-  if (s === '3') return true;
+  if (s === '4') return true;
   if (s.includes('regimento')) return true;
   if (s.includes('convencao') || s.includes('convenção')) return true;
   if (s.includes('duvida') || s.includes('dúvida')) return true;
+  if (s.includes('condominio') || s.includes('condomínio')) return true;
   return false;
 }
 
 function isAdminIntent(text: string) {
   const s = simplifyText(text);
   if (!s) return false;
-  if (s === '4') return true;
+  if (s === '3') return true;
   if (s.includes('administracao') || s.includes('administração')) return true;
   if (s.includes('administrador')) return true;
   if (s.includes('falar com')) return true;
+  if (s.includes('sindico') || s.includes('síndico')) return true;
   return false;
 }
 

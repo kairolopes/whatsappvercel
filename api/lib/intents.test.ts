@@ -21,15 +21,15 @@ describe('intents', () => {
   });
 
   test('docs intent', () => {
-    expect(isRegimentoIntent('3')).toBe(true);
-    expect(isRegimentoIntent('tres')).toBe(true);
+    expect(isRegimentoIntent('4')).toBe(true);
+    expect(isRegimentoIntent('quatro')).toBe(true);
     expect(isRegimentoIntent('dúvida sobre convenção')).toBe(true);
     expect(isRegimentoIntent('regimento interno')).toBe(true);
   });
 
   test('admin intent', () => {
-    expect(isAdminIntent('4')).toBe(true);
-    expect(isAdminIntent('quatro')).toBe(true);
+    expect(isAdminIntent('3')).toBe(true);
+    expect(isAdminIntent('tres')).toBe(true);
     expect(isAdminIntent('falar com a administração')).toBe(true);
   });
 

@@ -49,6 +49,74 @@ function addMessageIdCandidates(target: Set<string>, input: unknown) {
   }
 }
 
+function hashSeed(input: string) {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function pickVariant(seed: string, variants: string[]) {
+  const list = Array.isArray(variants) ? variants.filter(Boolean) : [];
+  if (list.length === 0) return '';
+  const idx = hashSeed(seed) % list.length;
+  return list[idx];
+}
+
+function extractPreferredName(input: string) {
+  const raw = String(input || '').trim();
+  if (!raw) return '';
+  const s = raw
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const m = s.match(/\b(meu nome e|meu nome é|eu sou|pode me chamar de|chama(\-)?me de)\s+(.{2,40})$/i);
+  const candidate = (m ? m[3] : s).trim();
+  const cleaned = candidate
+    .replace(/[^A-Za-zÀ-ÿ\s'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const parts = cleaned.split(' ').filter(Boolean);
+  if (parts.length === 0) return '';
+  const name = parts.slice(0, 3).join(' ');
+  if (name.length < 2) return '';
+  if (name.length > 40) return name.slice(0, 40).trim();
+  return name;
+}
+
+function looksLikeCondoQuestion(input: string) {
+  const s = simplifyText(String(input || ''));
+  if (!s) return false;
+  const keywords = [
+    'condominio',
+    'regimento',
+    'convencao',
+    'barulho',
+    'obra',
+    'reforma',
+    'pet',
+    'cachorro',
+    'gato',
+    'multa',
+    'vaga',
+    'garagem',
+    'piscina',
+    'churrasqueira',
+    'salao',
+    'horario',
+    'horarios',
+    'permitido',
+    'proibido',
+    'pode',
+  ];
+  if (keywords.some((k) => s.includes(k))) return true;
+  if (String(input || '').includes('?')) return true;
+  return false;
+}
+
 function isPlaceholderMessageText(input: unknown): boolean {
   const raw = typeof input === 'string' ? input : '';
   if (!raw) return false;
@@ -141,10 +209,10 @@ function buildWelcomeMenu(params: { name: string; apartment: string; block: stri
   return (
     `Olá, ${name}, sua conta está vinculada ao apartamento ${apartment}, Bloco ${block}, do CONDOMINIO CAMPOS ALTOS!\n\n` +
     `Como posso te ajudar hoje?\n\n` +
-    `1 - Boletos a pagar;\n\n` +
-    `2 - Reserva de Ambientes;\n\n` +
-    `3 - Dúvidas sobre a Convenção e Regimento Interno;\n\n` +
-    `4 - Falar com a Administração;`
+    `1 - Boleto;\n\n` +
+    `2 - Reservar ambiente;\n\n` +
+    `3 - Falar com a Administração / Síndico;\n\n` +
+    `4 - Dúvidas sobre o condomínio (Convenção/Regimento).`
   );
 }
 
@@ -967,6 +1035,7 @@ export default async function handler(req: any, res: any) {
     let supportState = '';
     let supportTopic = '';
     let supportPayload: any = {};
+    let preferredName = '';
 
     if (msg.kind === 'audio' && !incomingText) {
       const audioUrl = typeof (msg.meta as any)?.url === 'string' ? String((msg.meta as any).url).trim() : '';
@@ -996,7 +1065,7 @@ export default async function handler(req: any, res: any) {
     try {
       const { data: existingClient } = await supabase
         .from('clients')
-        .select('phone,status,matched,unit_id,block,apartment,last_auto_reply_to,last_auto_reply_at,support_state,support_topic,support_payload')
+        .select('phone,status,matched,unit_id,block,apartment,preferred_name,last_auto_reply_to,last_auto_reply_at,support_state,support_topic,support_payload')
         .eq('phone', phoneDigits)
         .maybeSingle();
 
@@ -1026,6 +1095,7 @@ export default async function handler(req: any, res: any) {
         supportState = String((existingClient as any)?.support_state ?? '').trim();
         supportTopic = String((existingClient as any)?.support_topic ?? '').trim();
         supportPayload = (existingClient as any)?.support_payload && typeof (existingClient as any)?.support_payload === 'object' ? (existingClient as any).support_payload : {};
+        preferredName = String((existingClient as any)?.preferred_name ?? '').trim();
         await supabase
           .from('clients')
           .update({ whatsapp_name: senderDisplayName, whatsapp_photo_url: avatarUrl })
@@ -1068,6 +1138,130 @@ export default async function handler(req: any, res: any) {
       }
     }
 
+    const nameForChat = preferredName || senderDisplayName;
+
+    const onboardingState = String(supportState || '').trim();
+    const onboardingSeed = `${phoneDigits}:${messageId || ''}:${incomingText || ''}`;
+
+    if (!handledByLookup && incomingText && onboardingState === 'onboard_wait_name') {
+      const extracted = extractPreferredName(incomingText);
+      if (!extracted) {
+        const variants = [
+          'Perfeito. Como você prefere ser chamado(a)?',
+          'Claro. Qual é o seu nome?',
+          'Pode me dizer seu nome para eu te chamar direitinho?',
+        ];
+        const finalText = signedText(signature, pickVariant(onboardingSeed, variants));
+        try {
+          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        } catch {
+        }
+        handledByLookup = true;
+      } else {
+        try {
+          await supabase.from('clients').update({ preferred_name: extracted }).eq('phone', phoneDigits);
+        } catch {
+        }
+
+        if (clientApartment && clientBlock) {
+          const confirmVariants = [
+            `Prazer, ${extracted}. Só confirmando: você está vinculado(a) ao apartamento ${clientApartment}, bloco ${clientBlock}?\n\nResponda 1 para SIM ou 2 para NÃO.`,
+            `${extracted}, só para eu não errar: seu vínculo é no apto ${clientApartment}, bloco ${clientBlock}?\n\n1 = Sim\n2 = Não`,
+          ];
+          const finalText = signedText(signature, pickVariant(onboardingSeed, confirmVariants));
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            await supabase
+              .from('clients')
+              .update({ support_state: 'onboard_confirm_unit', support_payload: { apartment: clientApartment, block: clientBlock, unit_id: clientUnitId || null } })
+              .eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        } else {
+          const askUnit =
+            `Prazer, ${extracted}. Você está vinculado(a) a qual unidade?\n\n` +
+            `- Apartamento/Bloco (ex: Bloco 07, Apto 0107)\n` +
+            `- Casa/Quadra/Lote/Unidade (ex: Quadra A, Lote 12)\n\n` +
+            `Me envie como texto para eu encaminhar à Administração e vincular.`;
+          const finalText = signedText(signature, askUnit);
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            await supabase.from('clients').update({ support_state: 'onboard_wait_unit', support_payload: {} }).eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        }
+      }
+    }
+
+    if (!handledByLookup && incomingText && onboardingState === 'onboard_confirm_unit') {
+      if (isAffirmative(incomingText)) {
+        const finalText = signedText(signature, buildWelcomeMenu({ name: nameForChat, apartment: clientApartment, block: clientBlock }));
+        try {
+          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+        } catch {
+        }
+        handledByLookup = true;
+      } else if (isNegative(incomingText)) {
+        const ask =
+          `Sem problemas, ${nameForChat}. Me diga qual é sua unidade para eu encaminhar e ajustar o vínculo.\n\n` +
+          `- Apartamento/Bloco (ex: Bloco 07, Apto 0107)\n` +
+          `- Casa/Quadra/Lote/Unidade (ex: Quadra A, Lote 12)`;
+        const finalText = signedText(signature, ask);
+        try {
+          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          await supabase.from('clients').update({ support_state: 'onboard_wait_unit', support_payload: {} }).eq('phone', phoneDigits);
+        } catch {
+        }
+        handledByLookup = true;
+      }
+    }
+
+    if (!handledByLookup && incomingText && onboardingState === 'onboard_wait_unit') {
+      const provided = incomingText;
+      const adminPhone = getAdminForwardPhone();
+      const ackVariants = [
+        `Obrigado, ${nameForChat}. Vou encaminhar sua unidade para a Administração e, enquanto isso, posso te ajudar com as opções abaixo.`,
+        `Perfeito, ${nameForChat}. Já vou passar isso para a Administração. Enquanto isso, posso te ajudar com:`,
+      ];
+      const ack = pickVariant(onboardingSeed, ackVariants);
+
+      const menu =
+        `1 - Boleto\n` +
+        `2 - Reservar ambiente\n` +
+        `3 - Falar com a Administração / Síndico\n` +
+        `4 - Dúvidas sobre o condomínio (Convenção/Regimento)`;
+
+      const finalText = signedText(signature, `${ack}\n\n${menu}`);
+      try {
+        await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+      } catch {
+      }
+
+      if (adminPhone) {
+        const forward = signedText(
+          signature,
+          `Vínculo informado pelo morador:\nCliente: ${nameForChat}\nTelefone: ${phoneDigits}\nInformado: ${provided}`,
+        );
+        try {
+          await zapiFetch('POST', '/send-text', { phone: adminPhone, message: forward });
+        } catch {
+        }
+      }
+
+      try {
+        await supabase
+          .from('clients')
+          .update({ support_state: null, support_payload: { provided_unit: provided }, support_topic: 'onboarding' })
+          .eq('phone', phoneDigits);
+      } catch {
+      }
+
+      handledByLookup = true;
+    }
+
     const docsState = String(supportState || '').trim();
     const isDocsFlow = docsState.startsWith('docs_');
 
@@ -1089,6 +1283,118 @@ export default async function handler(req: any, res: any) {
       isReservaIntent(incomingText) ||
       isRegimentoIntent(incomingText) ||
       isAdminIntent(incomingText);
+
+    if (!handledByLookup && incomingText && !isDocsFlow && !isOtherIntent && shouldAutoReply()) {
+      if (looksLikeCondoQuestion(incomingText)) {
+        const q = incomingText;
+        const confirmTemplates = [
+          `Só confirmando: sua dúvida é esta?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
+          `Entendi. Você quer perguntar isso, certo?\n\n"${q}"\n\n1 = Sim\n2 = Não`,
+        ];
+        const confirm = signedText(signature, pickVariant(onboardingSeed, confirmTemplates));
+        try {
+          const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+          const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+          await supabase.from('messages').insert([
+            {
+              conversation_id: upsertedConv.id,
+              text: confirm,
+              sender: 'user',
+              timestamp: formatTimeHM(new Date()),
+              status: 'sent',
+              external_id: externalId || null,
+              kind: 'text',
+              meta: { action: 'docs_confirm_prompt', ai: true, question: q },
+            },
+          ]);
+          await supabase
+            .from('clients')
+            .update({ support_state: 'docs_confirm', support_topic: 'regimento_convencao', support_payload: { question: q } })
+            .eq('phone', phoneDigits);
+        } catch {
+        }
+        handledByLookup = true;
+      } else {
+        if (!preferredName) {
+          const extracted = extractPreferredName(incomingText);
+          if (extracted) {
+            try {
+              await supabase.from('clients').update({ preferred_name: extracted }).eq('phone', phoneDigits);
+            } catch {
+            }
+
+            if (clientApartment && clientBlock) {
+              const confirmTemplates = [
+                `Prazer, ${extracted}. Só confirmando: você está vinculado(a) ao apartamento ${clientApartment}, bloco ${clientBlock}?\n\nResponda 1 para SIM ou 2 para NÃO.`,
+                `${extracted}, só para eu não errar: seu vínculo é no apto ${clientApartment}, bloco ${clientBlock}?\n\n1 = Sim\n2 = Não`,
+              ];
+              const confirm = signedText(signature, pickVariant(onboardingSeed, confirmTemplates));
+              try {
+                await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+                await supabase
+                  .from('clients')
+                  .update({ support_state: 'onboard_confirm_unit', support_topic: 'onboarding', support_payload: { apartment: clientApartment, block: clientBlock, unit_id: clientUnitId || null } })
+                  .eq('phone', phoneDigits);
+              } catch {
+              }
+              handledByLookup = true;
+            } else {
+              const ask =
+                `Prazer, ${extracted}. Você está vinculado(a) a qual unidade?\n\n` +
+                `- Apartamento/Bloco (ex: Bloco 07, Apto 0107)\n` +
+                `- Casa/Quadra/Lote/Unidade (ex: Quadra A, Lote 12)`;
+              const finalText = signedText(signature, ask);
+              try {
+                await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+                await supabase
+                  .from('clients')
+                  .update({ support_state: 'onboard_wait_unit', support_topic: 'onboarding', support_payload: {} })
+                  .eq('phone', phoneDigits);
+              } catch {
+              }
+              handledByLookup = true;
+            }
+          }
+
+          if (!handledByLookup) {
+          const helloVariants = [
+            `Olá! Eu sou o ${signature}. Como posso te chamar?`,
+            `Oi! Aqui é o ${signature}. Qual é o seu nome?`,
+            `Olá! Sou o ${signature}. Me diz seu nome para eu te atender melhor?`,
+          ];
+          const finalText = signedText(signature, pickVariant(onboardingSeed, helloVariants));
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            await supabase.from('clients').update({ support_state: 'onboard_wait_name', support_topic: 'onboarding', support_payload: {} }).eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+          }
+        } else {
+          if (clientApartment && clientBlock) {
+            const menu = buildWelcomeMenu({ name: nameForChat, apartment: clientApartment, block: clientBlock });
+            const finalText = signedText(signature, menu);
+            try {
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            } catch {
+            }
+            handledByLookup = true;
+          } else {
+            const ask =
+              `Entendi, ${nameForChat}. Você está vinculado(a) a qual unidade?\n\n` +
+              `- Apartamento/Bloco (ex: Bloco 07, Apto 0107)\n` +
+              `- Casa/Quadra/Lote/Unidade (ex: Quadra A, Lote 12)`;
+            const finalText = signedText(signature, ask);
+            try {
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+              await supabase.from('clients').update({ support_state: 'onboard_wait_unit', support_topic: 'onboarding', support_payload: {} }).eq('phone', phoneDigits);
+            } catch {
+            }
+            handledByLookup = true;
+          }
+        }
+      }
+    }
 
     if (!handledByLookup && incomingText && isDocsFlow && (docsState === 'docs_confirm' || !isOtherIntent)) {
       const questionFromPayload = String(supportPayload?.question ?? '').trim();
@@ -1122,7 +1428,7 @@ export default async function handler(req: any, res: any) {
             }
           }
           lines.push('');
-          lines.push('Quer que eu procure mais detalhes, ou prefere falar com a Administração? (Responda 4)');
+          lines.push('Quer que eu procure mais detalhes, ou prefere falar com a Administração? (Responda 3)');
 
           const finalText = signedText(signature, lines.join('\n'));
           try {
@@ -1200,7 +1506,10 @@ export default async function handler(req: any, res: any) {
         }
       } else if (docsState === 'docs_wait_question' || docsState === 'docs_active') {
         if (isCancel(incomingText)) {
-          const finalText = signedText(signature, 'Tudo bem. Posso te ajudar com: 1 boletos, 2 reservas, 3 regimento/convenção, 4 administração.');
+          const finalText = signedText(
+            signature,
+            'Tudo bem. Posso te ajudar com:\n\n1 - Boleto\n2 - Reservar ambiente\n3 - Administração/Síndico\n4 - Dúvidas (Convenção/Regimento)',
+          );
           try {
             await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
             await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
@@ -1245,7 +1554,7 @@ export default async function handler(req: any, res: any) {
 
     if (!handledByLookup && incomingText && isBoletoIntent(incomingText)) {
       if (!clientUnitId) {
-        const replyBody = `Olá, ${senderDisplayName}. Não consegui identificar sua unidade para buscar boletos. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
+        const replyBody = `Olá, ${nameForChat}. Não consegui identificar sua unidade para buscar boletos. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
         const finalText = signedText(signature, replyBody);
         try {
           const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
@@ -1340,7 +1649,7 @@ export default async function handler(req: any, res: any) {
           if (candidates.length === 0) {
             const finalText = signedText(
               signature,
-              `Olá, ${senderDisplayName}. Não foi possível localizar o boleto do mês para sua unidade. Entre em contato com a Administração.`,
+              `Olá, ${nameForChat}. Não foi possível localizar o boleto do mês para sua unidade. Entre em contato com a Administração.`,
             );
             const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
             const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
@@ -1381,7 +1690,7 @@ export default async function handler(req: any, res: any) {
             if (!link) {
               const finalText = signedText(
                 signature,
-                `Olá, ${senderDisplayName}. Não foi possível localizar um link pagável do boleto do mês. Entre em contato com a Administração.`,
+                `Olá, ${nameForChat}. Não foi possível localizar um link pagável do boleto do mês. Entre em contato com a Administração.`,
               );
               const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
               const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
@@ -1463,7 +1772,7 @@ export default async function handler(req: any, res: any) {
             }
           }
         } catch {
-          const replyBody = `Olá, ${senderDisplayName}. Tive um problema ao consultar seus boletos agora. Tente novamente em instantes.`;
+          const replyBody = `Olá, ${nameForChat}. Tive um problema ao consultar seus boletos agora. Tente novamente em instantes.`;
           const finalText = signedText(signature, replyBody);
           try {
             const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
@@ -1494,7 +1803,7 @@ export default async function handler(req: any, res: any) {
     if (!handledByLookup && incomingText && isReservaIntent(incomingText)) {
       const reservaUrl = getReservaUrl();
       const lines: string[] = [];
-      lines.push(`Olá, ${senderDisplayName}.`);
+      lines.push(`Olá, ${nameForChat}.`);
       if (reservaUrl) {
         lines.push('Para reservar ambientes, acesse o link abaixo:');
         lines.push(reservaUrl);
@@ -1658,9 +1967,9 @@ export default async function handler(req: any, res: any) {
         let replyBody = '';
 
         if (!clientApartment || !clientBlock) {
-          replyBody = `Olá, ${senderDisplayName}. Não consegui identificar seu apartamento e bloco automaticamente. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
+          replyBody = `Olá, ${nameForChat}. Não consegui identificar seu apartamento e bloco automaticamente. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
         } else {
-          replyBody = buildWelcomeMenu({ name: senderDisplayName, apartment: clientApartment, block: clientBlock });
+          replyBody = buildWelcomeMenu({ name: nameForChat, apartment: clientApartment, block: clientBlock });
         }
 
         const finalText = signedText(signature, replyBody);
