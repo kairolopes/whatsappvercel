@@ -96,7 +96,13 @@ function extractPreferredName(input: string, allowSingleWord: boolean) {
 function looksLikeCondoQuestion(input: string) {
   const s = simplifyText(String(input || ''));
   if (!s) return false;
-  const keywords = [
+
+  const greetings = new Set(['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'e ai', 'e aí']);
+  if (greetings.has(s)) return false;
+
+  if (String(input || '').includes('?')) return true;
+
+  const strongKeywords = [
     'condominio',
     'regimento',
     'convencao',
@@ -104,22 +110,24 @@ function looksLikeCondoQuestion(input: string) {
     'obra',
     'reforma',
     'pet',
-    'cachorro',
-    'gato',
     'multa',
     'vaga',
     'garagem',
     'piscina',
     'churrasqueira',
     'salao',
+    'portaria',
+    'visitante',
     'horario',
-    'horarios',
     'permitido',
     'proibido',
-    'pode',
   ];
-  if (keywords.some((k) => s.includes(k))) return true;
-  if (String(input || '').includes('?')) return true;
+  if (strongKeywords.some((k) => s.includes(k))) return true;
+
+  const tokens = s.split(' ').filter((t) => t.length >= 3);
+  if (tokens.length < 2) return false;
+  if (s.includes('pode')) return true;
+
   return false;
 }
 
