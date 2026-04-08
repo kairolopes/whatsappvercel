@@ -78,6 +78,24 @@ function extractPreferredName(input: string, allowSingleWord: boolean) {
   const greetings = new Set(['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite']);
   if (!m && (greetings.has(simplified) || (!allowSingleWord && simplified.length < 4))) return '';
 
+  if (!m) {
+    const stop = [
+      'quero',
+      'preciso',
+      'manda',
+      'enviar',
+      'boleto',
+      'reserva',
+      'administracao',
+      'sindico',
+      'duvida',
+      'regimento',
+      'convencao',
+      'condominio',
+    ];
+    if (stop.some((w) => simplified.includes(w))) return '';
+  }
+
   const candidate = (m ? m[3] : s).trim();
   const cleaned = candidate
     .replace(/[^A-Za-zÀ-ÿ\s'-]/g, ' ')
@@ -1215,10 +1233,33 @@ export default async function handler(req: any, res: any) {
 
     const nameForChat = preferredName || senderDisplayName;
 
-    const onboardingState = String(supportState || '').trim();
+    let onboardingState = String(supportState || '').trim();
     const onboardingSeed = `${phoneDigits}:${messageId || ''}:${incomingText || ''}`;
 
     if (!handledByLookup && incomingText && onboardingState === 'onboard_wait_name') {
+      const quickIntent =
+        isMenuChoice(incomingText) ||
+        isBoletoIntent(incomingText) ||
+        isReservaIntent(incomingText) ||
+        isAdminIntent(incomingText) ||
+        isRegimentoIntent(incomingText);
+
+      let shouldExitOnboarding = quickIntent;
+      if (!shouldExitOnboarding) {
+        const ai = await classifyRoutingIntent(incomingText);
+        if ((ai.intent === 'boleto' || ai.intent === 'reserva' || ai.intent === 'admin' || ai.intent === 'docs') && ai.confidence >= 0.55) {
+          shouldExitOnboarding = true;
+        }
+      }
+
+      if (shouldExitOnboarding) {
+        try {
+          await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+        } catch {
+        }
+        onboardingState = '';
+        supportState = '';
+      } else {
       const extracted = extractPreferredName(incomingText, true);
       if (!extracted) {
         const variants = [
@@ -1269,6 +1310,7 @@ export default async function handler(req: any, res: any) {
           }
           handledByLookup = true;
         }
+      }
       }
     }
 
