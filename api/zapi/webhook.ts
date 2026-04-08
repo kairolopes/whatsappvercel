@@ -65,7 +65,7 @@ function pickVariant(seed: string, variants: string[]) {
   return list[idx];
 }
 
-function extractPreferredName(input: string) {
+function extractPreferredName(input: string, allowSingleWord: boolean) {
   const raw = String(input || '').trim();
   if (!raw) return '';
   const s = raw
@@ -74,6 +74,10 @@ function extractPreferredName(input: string) {
     .trim();
 
   const m = s.match(/\b(meu nome e|meu nome é|eu sou|pode me chamar de|chama(\-)?me de)\s+(.{2,40})$/i);
+  const simplified = simplifyText(s);
+  const greetings = new Set(['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite']);
+  if (!m && (greetings.has(simplified) || simplified.length < 4)) return '';
+
   const candidate = (m ? m[3] : s).trim();
   const cleaned = candidate
     .replace(/[^A-Za-zÀ-ÿ\s'-]/g, ' ')
@@ -81,6 +85,8 @@ function extractPreferredName(input: string) {
     .trim();
   const parts = cleaned.split(' ').filter(Boolean);
   if (parts.length === 0) return '';
+  if (!allowSingleWord && parts.length < 2 && !m) return '';
+
   const name = parts.slice(0, 3).join(' ');
   if (name.length < 2) return '';
   if (name.length > 40) return name.slice(0, 40).trim();
@@ -1144,7 +1150,7 @@ export default async function handler(req: any, res: any) {
     const onboardingSeed = `${phoneDigits}:${messageId || ''}:${incomingText || ''}`;
 
     if (!handledByLookup && incomingText && onboardingState === 'onboard_wait_name') {
-      const extracted = extractPreferredName(incomingText);
+      const extracted = extractPreferredName(incomingText, true);
       if (!extracted) {
         const variants = [
           'Perfeito. Como você prefere ser chamado(a)?',
@@ -1321,7 +1327,7 @@ export default async function handler(req: any, res: any) {
         handledByLookup = true;
       } else {
         if (!preferredName) {
-          const extracted = extractPreferredName(incomingText);
+          const extracted = extractPreferredName(incomingText, false);
           if (extracted) {
             try {
               await supabase.from('clients').update({ preferred_name: extracted }).eq('phone', phoneDigits);
