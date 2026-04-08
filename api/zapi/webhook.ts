@@ -1607,7 +1607,7 @@ export default async function handler(req: any, res: any) {
       !isRegimentoIntent(text.trim()) &&
       !isAdminIntent(text.trim());
 
-    if (shouldSendMenu) {
+    if (!handledByLookup && shouldSendMenu) {
       const now = Date.now();
       const lastAtMs = lastAutoReplyAt ? Date.parse(String(lastAutoReplyAt)) : NaN;
       const tooSoon = Number.isFinite(lastAtMs) ? now - lastAtMs < 5000 : false;
