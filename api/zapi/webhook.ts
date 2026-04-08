@@ -126,6 +126,57 @@ function isBoletoIntent(text: string) {
   return false;
 }
 
+function isReservaIntent(text: string) {
+  const s = simplifyText(text);
+  if (!s) return false;
+  if (s === '2') return true;
+  if (s.includes('reserva')) return true;
+  if (s.includes('reservar')) return true;
+  if (s.includes('salão') || s.includes('salao')) return true;
+  if (s.includes('churrasqueira')) return true;
+  if (s.includes('quadra')) return true;
+  return false;
+}
+
+function isRegimentoIntent(text: string) {
+  const s = simplifyText(text);
+  if (!s) return false;
+  if (s === '3') return true;
+  if (s.includes('regimento')) return true;
+  if (s.includes('convencao') || s.includes('convenção')) return true;
+  return false;
+}
+
+function isAdminIntent(text: string) {
+  const s = simplifyText(text);
+  if (!s) return false;
+  if (s === '4') return true;
+  if (s.includes('administracao') || s.includes('administração')) return true;
+  if (s.includes('administrador')) return true;
+  if (s.includes('falar com')) return true;
+  return false;
+}
+
+function normalizeDigitsOnly(value: unknown) {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
+function getAdminForwardPhone(): string {
+  return normalizeDigitsOnly(process.env.ADMIN_FORWARD_PHONE || '');
+}
+
+function getReservaUrl(): string {
+  return String(process.env.RESERVA_URL || '').trim();
+}
+
+function getRegimentoPdfUrl(): string {
+  return String(process.env.REGIMENTO_PDF_URL || '').trim();
+}
+
+function getConvencaoPdfUrl(): string {
+  return String(process.env.CONVENCAO_PDF_URL || '').trim();
+}
+
 function buildWelcomeMenu(params: { name: string; apartment: string; block: string }) {
   const name = String(params.name || '').trim() || 'morador';
   const apartment = String(params.apartment || '').trim();
@@ -1030,13 +1081,139 @@ export default async function handler(req: any, res: any) {
       }
     }
 
+    if (!handledByLookup && msg.kind === 'text' && incomingText && isReservaIntent(incomingText)) {
+      const reservaUrl = getReservaUrl();
+      const lines: string[] = [];
+      lines.push(`Olá, ${senderDisplayName}.`);
+      if (reservaUrl) {
+        lines.push('Para reservar ambientes, acesse o link abaixo:');
+        lines.push(reservaUrl);
+      }
+      lines.push('Se preferir, me envie:');
+      lines.push('1) Ambiente (ex: salão, churrasqueira, quadra)');
+      lines.push('2) Data');
+      lines.push('3) Horário (início e fim)');
+
+      const finalText = signedText(signature, lines.join('\n'));
+      try {
+        const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+        await supabase.from('messages').insert([
+          {
+            conversation_id: upsertedConv.id,
+            text: finalText,
+            sender: 'user',
+            timestamp: formatTimeHM(new Date()),
+            status: 'sent',
+            external_id: externalId || null,
+            kind: 'text',
+            meta: { action: 'reserva', ai: true },
+          },
+        ]);
+        await supabase
+          .from('conversations')
+          .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+          .eq('id', upsertedConv.id);
+      } catch {
+      }
+
+      handledByLookup = true;
+    }
+
+    if (!handledByLookup && msg.kind === 'text' && incomingText && isRegimentoIntent(incomingText)) {
+      const regimentoUrl = getRegimentoPdfUrl();
+      const convencaoUrl = getConvencaoPdfUrl();
+
+      const caption = signedText(signature, 'Segue a Convenção e/ou Regimento Interno do condomínio.');
+
+      let sentAny = false;
+      try {
+        if (convencaoUrl) {
+          await zapiFetch('POST', '/send-document/pdf', {
+            phone: phoneDigits,
+            document: convencaoUrl,
+            fileName: 'convencao.pdf',
+            caption,
+          });
+          sentAny = true;
+        }
+        if (regimentoUrl) {
+          await zapiFetch('POST', '/send-document/pdf', {
+            phone: phoneDigits,
+            document: regimentoUrl,
+            fileName: 'regimento-interno.pdf',
+            caption,
+          });
+          sentAny = true;
+        }
+      } catch {
+      }
+
+      if (!sentAny) {
+        const finalText = signedText(signature, 'No momento eu não tenho o PDF configurado.');
+        try {
+          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        } catch {
+        }
+      }
+
+      handledByLookup = true;
+    }
+
+    if (!handledByLookup && msg.kind === 'text' && incomingText && isAdminIntent(incomingText)) {
+      const adminPhone = getAdminForwardPhone();
+      const ack = signedText(signature, 'Certo. Vou encaminhar sua mensagem para a Administração.');
+
+      try {
+        const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: ack });
+        const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+        await supabase.from('messages').insert([
+          {
+            conversation_id: upsertedConv.id,
+            text: ack,
+            sender: 'user',
+            timestamp: formatTimeHM(new Date()),
+            status: 'sent',
+            external_id: externalId || null,
+            kind: 'text',
+            meta: { action: 'admin', ai: true },
+          },
+        ]);
+      } catch {
+      }
+
+      if (adminPhone) {
+        const info = [
+          `Cliente: ${senderDisplayName}`,
+          `Telefone: ${phoneDigits}`,
+          clientApartment ? `Apartamento: ${clientApartment}` : '',
+          clientBlock ? `Bloco: ${clientBlock}` : '',
+          clientUnitId ? `Unidade: ${clientUnitId}` : '',
+          '',
+          `Mensagem: ${incomingText}`,
+        ]
+          .filter(Boolean)
+          .join('\n');
+        const forwardText = signedText(signature, info);
+        try {
+          await zapiFetch('POST', '/send-text', { phone: adminPhone, message: forwardText });
+        } catch {
+        }
+      }
+
+      handledByLookup = true;
+    }
+
     const shouldSendMenu =
       shouldAutoReply() &&
       msg.kind === 'text' &&
       typeof text === 'string' &&
       text.trim() &&
       !isMenuChoice(text.trim()) &&
-      !isBoletoIntent(text.trim());
+      !isBoletoIntent(text.trim()) &&
+      !isReservaIntent(text.trim()) &&
+      !isRegimentoIntent(text.trim()) &&
+      !isAdminIntent(text.trim());
 
     if (shouldSendMenu) {
       const now = Date.now();
