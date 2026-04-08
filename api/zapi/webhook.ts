@@ -539,6 +539,51 @@ async function findUnitByPhoneLast5(last5: string) {
   return null;
 }
 
+async function refreshClientUnitFromSuperlogica(params: {
+  supabase: any;
+  phoneDigits: string;
+  senderDisplayName: string;
+  avatarUrl: string | null;
+}) {
+  const phoneDigits = normalizeDigits(params.phoneDigits);
+  if (phoneDigits.length < 10) return null;
+  const last5 = phoneDigits.slice(-5);
+  if (last5.length !== 5) return null;
+
+  try {
+    const match = await findUnitByPhoneLast5(last5);
+    if (!match) return null;
+
+    const unitId = String(match.unitId || '').trim();
+    const block = String(match.block || '').trim();
+    const apartment = String(match.apartment || '').trim();
+
+    try {
+      await params.supabase
+        .from('clients')
+        .upsert(
+          {
+            phone: phoneDigits,
+            status: 1,
+            matched: true,
+            unit_id: unitId || null,
+            block: block || null,
+            apartment: apartment || null,
+            whatsapp_name: params.senderDisplayName,
+            whatsapp_photo_url: params.avatarUrl,
+            match_payload: match.raw ?? {},
+          },
+          { onConflict: 'phone' },
+        );
+    } catch {
+    }
+
+    return { unitId, block, apartment };
+  } catch {
+    return null;
+  }
+}
+
 async function decideWithChatGpt(input: { phone: string; message: string }) {
   const apiKey = getOpenAiKey();
   if (!apiKey) return { action: 'none' as const };
@@ -1356,6 +1401,18 @@ export default async function handler(req: any, res: any) {
       }
 
       if (adminPhone) {
+        const refreshed = await refreshClientUnitFromSuperlogica({
+          supabase,
+          phoneDigits,
+          senderDisplayName,
+          avatarUrl,
+        });
+        if (refreshed) {
+          clientUnitId = refreshed.unitId;
+          clientBlock = refreshed.block;
+          clientApartment = refreshed.apartment;
+        }
+
         const info = [
           `Cliente: ${senderDisplayName}`,
           `Telefone: ${phoneDigits}`,
@@ -1395,6 +1452,18 @@ export default async function handler(req: any, res: any) {
       const sameMessage = Boolean(messageId) && Boolean(lastAutoReplyTo) && lastAutoReplyTo === String(messageId);
 
       if (!tooSoon && !sameMessage) {
+        const refreshed = await refreshClientUnitFromSuperlogica({
+          supabase,
+          phoneDigits,
+          senderDisplayName,
+          avatarUrl,
+        });
+        if (refreshed) {
+          clientUnitId = refreshed.unitId;
+          clientBlock = refreshed.block;
+          clientApartment = refreshed.apartment;
+        }
+
         let replyBody = '';
 
         if (!clientApartment || !clientBlock) {
