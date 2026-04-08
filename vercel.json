@@ -1,10 +1,7 @@
 {
   "functions": {
     "api/**/*.ts": {
-      "includeFiles": [
-        "api/lib/condoDocs.index.json",
-        "*.pdf"
-      ]
+      "includeFiles": "{api/lib/condoDocs.index.json,*.pdf}"
     }
   },
   "routes": [
