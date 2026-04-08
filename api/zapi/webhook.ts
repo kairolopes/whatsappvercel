@@ -678,7 +678,7 @@ async function answerWithCondoDocs(question: string) {
           {
             role: 'system',
             content:
-              'Você responde dúvidas sobre condomínio usando SOMENTE os trechos fornecidos. Seja empático, direto e prático. Se não houver base suficiente, diga que não encontrou nos documentos e sugira falar com a Administração. Retorne JSON com: answer (string) e sources (array de {doc,page,excerpt}). Em sources, use apenas doc/page/excerpt fornecidos, no máximo 3 itens.',
+              'Você responde dúvidas sobre condomínio usando SOMENTE os trechos fornecidos. Seja empático, direto e prático. Se os trechos forem parciais, responda com o que eles cobrem e deixe claro a limitação (sem inventar). Retorne JSON com: answer (string) e sources (array de {doc,page,excerpt}). Em sources, use apenas doc/page/excerpt fornecidos, no máximo 3 itens.',
           },
           {
             role: 'user',
@@ -706,11 +706,24 @@ async function answerWithCondoDocs(question: string) {
       }))
       .filter((s) => s.doc && s.page > 0 && s.excerpt);
 
+    const refusalSignals = ['não consegui', 'nao consegui', 'não encontrei', 'nao encontrei', 'sem clareza'];
+    const isRefusal = refusalSignals.some((s) => answer.toLowerCase().includes(s));
+
     if (!answer) {
       return {
         answer:
           'Entendi sua dúvida. Eu não consegui montar uma resposta com segurança usando os documentos agora. Quer que eu encaminhe para a Administração?',
         sources: hits.slice(0, 2).map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 240) })),
+      };
+    }
+
+    if (isRefusal && hits.length) {
+      const first = hits[0];
+      const excerpt = String(first?.snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 260);
+      return {
+        answer:
+          `Encontrei a referência abaixo nos documentos. Se você me disser sua situação (dia/horário/local), eu te explico como aplicar na prática.\n\n${first.docName}, pág. ${first.page}: ${excerpt}`,
+        sources: [{ doc: first.docName, page: first.page, excerpt: excerpt }],
       };
     }
 
@@ -1166,6 +1179,11 @@ export default async function handler(req: any, res: any) {
         lines.push('Onde encontrei:');
         for (const s of src) {
           lines.push(`${s.doc}, pág. ${s.page}`);
+        }
+        const excerpt = String(src[0]?.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
+        if (excerpt) {
+          lines.push('');
+          lines.push(`Trecho: "${excerpt}"`);
         }
       }
       lines.push('');
