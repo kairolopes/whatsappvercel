@@ -1504,7 +1504,7 @@ export default async function handler(req: any, res: any) {
           if (greetings.has(simplified)) {
             const finalText = signedText(
               signature,
-              'Para eu responder direitinho, me confirme com 1 (SIM) ou 2 (NÃO). Se quiser voltar ao menu, digite cancelar.',
+              `Para eu responder direitinho, me confirme com 1 (SIM) ou 2 (NÃO).\n\nSe preferir, você pode escolher uma opção agora:\n\n${buildOptionsMenu()}\n\nOu digite cancelar para sair desse passo.`,
             );
             try {
               await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
