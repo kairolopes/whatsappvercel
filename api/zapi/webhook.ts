@@ -1040,8 +1040,9 @@ export default async function handler(req: any, res: any) {
           const cobranca = await fetchSuperlogicaCobranca(clientUnitId);
           const items = collectRecebimentoItems(cobranca);
           const now = new Date();
-          const month = now.getMonth();
-          const year = now.getFullYear();
+          const nowMs = now.getTime();
+          const month = now.getUTCMonth();
+          const year = now.getUTCFullYear();
 
           const normalized = items
             .map((it: any) => {
@@ -1055,19 +1056,51 @@ export default async function handler(req: any, res: any) {
             })
             .filter(Boolean) as any[];
 
-          const inMonth = normalized.filter((x) => x.dueDate && x.dueDate.getUTCFullYear() === year && x.dueDate.getUTCMonth() === month);
+          const maxCandidates = 5;
+          const maxWindowDays = 62;
+          const maxWindowMs = maxWindowDays * 24 * 60 * 60 * 1000;
 
-          inMonth.sort((a, b) => {
-            const ad = a.dueMs ?? Number.POSITIVE_INFINITY;
-            const bd = b.dueMs ?? Number.POSITIVE_INFINITY;
-            const diffA = Math.abs(ad - now.getTime());
-            const diffB = Math.abs(bd - now.getTime());
-            if (diffA !== diffB) return diffA - diffB;
-            return String(a.id).localeCompare(String(b.id));
+          const candidatesThisMonth = normalized
+            .filter((x) => x.dueDate && x.dueDate.getUTCFullYear() === year && x.dueDate.getUTCMonth() === month)
+            .sort((a, b) => {
+              const ad = a.dueMs ?? Number.POSITIVE_INFINITY;
+              const bd = b.dueMs ?? Number.POSITIVE_INFINITY;
+              const diffA = Math.abs(ad - nowMs);
+              const diffB = Math.abs(bd - nowMs);
+              if (diffA !== diffB) return diffA - diffB;
+              return String(a.id).localeCompare(String(b.id));
+            })
+            .slice(0, maxCandidates);
+
+          const candidatesRecentPast = normalized
+            .filter((x) => typeof x.dueMs === 'number' && x.dueMs <= nowMs && nowMs - x.dueMs <= maxWindowMs)
+            .sort((a, b) => (b.dueMs ?? 0) - (a.dueMs ?? 0))
+            .slice(0, maxCandidates);
+
+          const candidatesNearFuture = normalized
+            .filter((x) => typeof x.dueMs === 'number' && x.dueMs > nowMs && x.dueMs - nowMs <= maxWindowMs)
+            .sort((a, b) => (a.dueMs ?? 0) - (b.dueMs ?? 0))
+            .slice(0, maxCandidates);
+
+          const candidatesFallback = normalized
+            .slice()
+            .sort((a, b) => {
+              const ad = typeof a.dueMs === 'number' ? a.dueMs : -1;
+              const bd = typeof b.dueMs === 'number' ? b.dueMs : -1;
+              if (ad !== bd) return bd - ad;
+              return String(a.id).localeCompare(String(b.id));
+            })
+            .slice(0, maxCandidates);
+
+          const unique = new Set<string>();
+          const candidates = [...candidatesThisMonth, ...candidatesRecentPast, ...candidatesNearFuture, ...candidatesFallback].filter((c) => {
+            if (!c?.id) return false;
+            if (unique.has(c.id)) return false;
+            unique.add(c.id);
+            return true;
           });
 
-          const chosen = inMonth[0];
-          if (!chosen) {
+          if (candidates.length === 0) {
             const finalText = signedText(
               signature,
               `Olá, ${senderDisplayName}. Não foi possível localizar o boleto do mês para sua unidade. Entre em contato com a Administração.`,
@@ -1092,7 +1125,22 @@ export default async function handler(req: any, res: any) {
               .eq('id', upsertedConv.id);
             handledByLookup = true;
           } else {
-            const link = await fetchSuperlogicaSegundaViaLink(chosen.id);
+            let chosen: any = null;
+            let link = '';
+            for (const cand of candidates) {
+              try {
+                const candidateLink = await fetchSuperlogicaSegundaViaLink(cand.id);
+                if (candidateLink) {
+                  chosen = cand;
+                  link = candidateLink;
+                  break;
+                }
+                if (!chosen) chosen = cand;
+              } catch {
+                if (!chosen) chosen = cand;
+              }
+            }
+
             if (!link) {
               const finalText = signedText(
                 signature,
@@ -1109,7 +1157,13 @@ export default async function handler(req: any, res: any) {
                   status: 'sent',
                   external_id: externalId || null,
                   kind: 'text',
-                  meta: { superlogica: true, action: 'boleto_mes', unit_id: clientUnitId, id_recebimento_recb: chosen.id, empty_link: true },
+                  meta: {
+                    superlogica: true,
+                    action: 'boleto_mes',
+                    unit_id: clientUnitId,
+                    id_recebimento_recb: chosen?.id || null,
+                    empty_link: true,
+                  },
                 },
               ]);
               await supabase
@@ -1133,8 +1187,8 @@ export default async function handler(req: any, res: any) {
             } else {
               const info = [
                 'Segue o boleto do mês:',
-                chosen.due ? `Vencimento: ${chosen.due}` : '',
-                chosen.amount ? `Valor: ${chosen.amount}` : '',
+                chosen?.due ? `Vencimento: ${chosen.due}` : '',
+                chosen?.amount ? `Valor: ${chosen.amount}` : '',
                 link,
               ]
                 .filter(Boolean)
@@ -1151,7 +1205,13 @@ export default async function handler(req: any, res: any) {
                   status: 'sent',
                   external_id: externalId || null,
                   kind: 'text',
-                  meta: { superlogica: true, action: 'boleto_mes', unit_id: clientUnitId, id_recebimento_recb: chosen.id, due: chosen.due || null },
+                  meta: {
+                    superlogica: true,
+                    action: 'boleto_mes',
+                    unit_id: clientUnitId,
+                    id_recebimento_recb: chosen?.id || null,
+                    due: chosen?.due || null,
+                  },
                 },
               ]);
               await supabase
