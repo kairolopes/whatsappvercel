@@ -1172,7 +1172,24 @@ export default async function handler(req: any, res: any) {
             `Só confirmando: você quer tirar a seguinte dúvida?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
           );
           try {
-            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+            await supabase.from('messages').insert([
+              {
+                conversation_id: upsertedConv.id,
+                text: confirm,
+                sender: 'user',
+                timestamp: formatTimeHM(new Date()),
+                status: 'sent',
+                external_id: externalId || null,
+                kind: 'text',
+                meta: { action: 'docs_confirm_prompt', ai: true, question: q },
+              },
+            ]);
+            await supabase
+              .from('conversations')
+              .update({ last_message: confirm, last_message_time: formatTimeHM(new Date()) })
+              .eq('id', upsertedConv.id);
             await supabase
               .from('clients')
               .update({ support_state: 'docs_confirm', support_topic: supportTopic || 'regimento_convencao', support_payload: { question: q } })
@@ -1197,7 +1214,24 @@ export default async function handler(req: any, res: any) {
             `Só confirmando: você quer tirar a seguinte dúvida?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
           );
           try {
-            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+            await supabase.from('messages').insert([
+              {
+                conversation_id: upsertedConv.id,
+                text: confirm,
+                sender: 'user',
+                timestamp: formatTimeHM(new Date()),
+                status: 'sent',
+                external_id: externalId || null,
+                kind: 'text',
+                meta: { action: 'docs_confirm_prompt', ai: true, question: q },
+              },
+            ]);
+            await supabase
+              .from('conversations')
+              .update({ last_message: confirm, last_message_time: formatTimeHM(new Date()) })
+              .eq('id', upsertedConv.id);
             await supabase
               .from('clients')
               .update({ support_state: 'docs_confirm', support_topic: supportTopic || 'regimento_convencao', support_payload: { question: q } })
@@ -1209,7 +1243,7 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    if (incomingText && isBoletoIntent(incomingText)) {
+    if (!handledByLookup && incomingText && isBoletoIntent(incomingText)) {
       if (!clientUnitId) {
         const replyBody = `Olá, ${senderDisplayName}. Não consegui identificar sua unidade para buscar boletos. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
         const finalText = signedText(signature, replyBody);
