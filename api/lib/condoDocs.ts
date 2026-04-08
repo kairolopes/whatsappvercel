@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 type DocPage = {
   docName: string;
@@ -83,10 +84,8 @@ export async function loadCondoDocsPages() {
   const ttlMs = 15 * 60 * 1000;
   if (cache && Date.now() - cache.loadedAt < ttlMs) return cache.pages;
 
-  const rootDir = process.cwd();
-
   try {
-    const indexPath = path.join(rootDir, 'api', 'lib', 'condoDocs.index.json');
+    const indexPath = fileURLToPath(new URL('./condoDocs.index.json', import.meta.url));
     if (fs.existsSync(indexPath)) {
       const raw = fs.readFileSync(indexPath, 'utf8');
       const parsed: any = JSON.parse(raw);
@@ -104,6 +103,8 @@ export async function loadCondoDocsPages() {
     }
   } catch {
   }
+
+  const rootDir = process.cwd();
 
   const docs = pickDocsFromRoot(rootDir);
   const pages: DocPage[] = [];
