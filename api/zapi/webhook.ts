@@ -1284,7 +1284,12 @@ export default async function handler(req: any, res: any) {
       isRegimentoIntent(incomingText) ||
       isAdminIntent(incomingText);
 
-    if (!handledByLookup && incomingText && !isDocsFlow && !isOtherIntent && shouldAutoReply()) {
+    if (!handledByLookup && incomingText && !isDocsFlow && !isOtherIntent) {
+      const now = Date.now();
+      const lastAtMs = lastAutoReplyAt ? Date.parse(String(lastAutoReplyAt)) : NaN;
+      const tooSoon = Number.isFinite(lastAtMs) ? now - lastAtMs < 5000 : false;
+      const sameMessage = Boolean(messageId) && Boolean(lastAutoReplyTo) && lastAutoReplyTo === String(messageId);
+      if (!tooSoon && !sameMessage) {
       if (looksLikeCondoQuestion(incomingText)) {
         const q = incomingText;
         const confirmTemplates = [
@@ -1393,6 +1398,7 @@ export default async function handler(req: any, res: any) {
             handledByLookup = true;
           }
         }
+      }
       }
     }
 
