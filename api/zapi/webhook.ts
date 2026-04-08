@@ -1885,22 +1885,94 @@ export default async function handler(req: any, res: any) {
         } else {
           const q = incomingText;
           const ai = await classifyRoutingIntent(q);
+          const simplified = simplifyText(q);
+          const greetingSet = new Set(['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'tudo bem']);
+          const lastPrompt = String(supportPayload?.last_prompt ?? '').trim();
+          const lastPromptAt = Number(supportPayload?.last_prompt_at ?? 0) || 0;
+          const nowMs = Date.now();
+
+          const isSwitchToOtherFlow =
+            (ai.intent === 'boleto' || ai.intent === 'reserva' || ai.intent === 'admin') && ai.confidence >= 0.55;
+          const isNotDocs = (ai.intent === 'greeting' || ai.intent === 'other') && ai.confidence >= 0.55;
+
+          if (
+            isMenuRequest(q) ||
+            isIdentityQuestion(q) ||
+            isLinkingIssue(q) ||
+            isSwitchToOtherFlow ||
+            isBoletoIntent(q) ||
+            isReservaIntent(q) ||
+            isAdminIntent(q)
+          ) {
+            try {
+              await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+            } catch {
+            }
+            handledByLookup = false;
+          }
+
+          if (!handledByLookup && (greetingSet.has(simplified) || isNotDocs)) {
+            const convo = await generateConversationalReply({
+              signature,
+              preferredName: nameForChat,
+              hasUnit: Boolean(clientApartment && clientBlock),
+              message: q,
+            });
+
+            const body = convo
+              ? `${convo.reply}\n\n${buildOptionsMenu()}`
+              : `Oi, ${nameForChat}. Posso te ajudar com:\n\n${buildOptionsMenu()}`;
+
+            const finalText = signedText(signature, body);
+            try {
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+              await supabase
+                .from('clients')
+                .update({ support_state: null, support_payload: {}, support_topic: supportTopic || 'regimento_convencao' })
+                .eq('phone', phoneDigits);
+            } catch {
+            }
+            handledByLookup = true;
+          }
+
           const clearlyDocs =
             (ai.intent === 'docs' && ai.confidence >= 0.6) ||
             looksLikeCondoQuestion(q) ||
             (q.includes('?') && q.length >= 10);
 
-          if (!clearlyDocs) {
-            const finalText = signedText(
-              signature,
-              `Entendi. Só para eu acertar: sua dúvida é sobre qual tema do condomínio?\n\nEx.: obra/reforma, barulho, pet, vaga, piscina, visitantes, multa.`,
-            );
-            try {
-              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-            } catch {
+          if (!handledByLookup && !clearlyDocs) {
+            if (isNegative(q)) {
+              const finalText = signedText(signature, `Sem problema. Me diga com o que você precisa e eu te direciono.\n\n${buildOptionsMenu()}`);
+              try {
+                await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+                await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+              } catch {
+              }
+              handledByLookup = true;
+            } else if (lastPrompt === 'docs_topic' && nowMs - lastPromptAt < 60_000) {
+              const finalText = signedText(signature, `Tudo bem. Me diga o que você precisa e eu te ajudo.\n\n${buildOptionsMenu()}`);
+              try {
+                await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+                await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+              } catch {
+              }
+              handledByLookup = true;
+            } else {
+              const finalText = signedText(
+                signature,
+                `Entendi. Pra eu acertar: sua dúvida é sobre qual assunto do condomínio?\n\nEx.: obra/reforma, barulho, pet, vaga, piscina, visitantes, multa.`,
+              );
+              try {
+                await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+                await supabase
+                  .from('clients')
+                  .update({ support_state: 'docs_wait_question', support_payload: { ...supportPayload, last_prompt: 'docs_topic', last_prompt_at: nowMs } })
+                  .eq('phone', phoneDigits);
+              } catch {
+              }
+              handledByLookup = true;
             }
-            handledByLookup = true;
-          } else {
+          } else if (!handledByLookup) {
             const result = await answerWithCondoDocs(q);
             const src = (result.sources || []).slice(0, 2);
             const lines: string[] = [];
