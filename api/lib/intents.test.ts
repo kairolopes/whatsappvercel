@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { isAdminIntent, isAffirmative, isBoletoIntent, isCancel, isNegative, isRegimentoIntent, isReservaIntent } from './intents';
+import { isAdminIntent, isAffirmative, isBoletoIntent, isCancel, isMenuRequest, isNegative, isRegimentoIntent, isReservaIntent } from './intents';
 
 describe('intents', () => {
   test('boleto intent', () => {
@@ -40,5 +40,12 @@ describe('intents', () => {
     expect(isNegative('não')).toBe(true);
     expect(isCancel('cancelar')).toBe(true);
     expect(isCancel('0')).toBe(true);
+  });
+
+  test('menu request', () => {
+    expect(isMenuRequest('menu')).toBe(true);
+    expect(isMenuRequest('opções')).toBe(true);
+    expect(isMenuRequest('opcoes')).toBe(true);
+    expect(isMenuRequest('quero boleto')).toBe(false);
   });
 });

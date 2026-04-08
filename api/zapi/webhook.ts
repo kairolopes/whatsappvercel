@@ -6,6 +6,7 @@ import {
   isBoletoIntent,
   isCancel,
   isMenuChoice,
+  isMenuRequest,
   isNegative,
   isRegimentoIntent,
   isReservaIntent,
@@ -726,7 +727,7 @@ async function classifyRoutingIntent(message: string) {
           {
             role: 'system',
             content:
-              'Classifique a intenção do usuário para um chatbot de condomínio. Responda SOMENTE JSON com campos: intent ("boleto"|"reserva"|"admin"|"docs"|"greeting"|"other"), confidence (0 a 1). Regras: (1) "docs" apenas quando for dúvida/regra do condomínio (convenção/regimento/horários/obra/pet/multa/vaga/barulho etc) e NÃO para cumprimentos. (2) "boleto" para 2ª via, boleto, taxa, fatura. (3) "reserva" para reservar salão/churrasqueira/quadra. (4) "admin" para falar com administração/síndico/porteiro/atendimento. (5) "greeting" para oi/olá/bom dia/boa tarde/boa noite/obrigado. Se estiver incerto, use other com confidence baixa.',
+              'Classifique a intenção do usuário para um chatbot de condomínio. Responda SOMENTE JSON com campos: intent ("boleto"|"reserva"|"admin"|"docs"|"greeting"|"other"), confidence (0 a 1). Importante: "docs" SOMENTE para dúvidas de regras/gestão/convivência/áreas comuns (convenção/regimento/horários/obra/pet/multa/vaga/barulho/piscina/visitantes/portaria). NÃO use docs para boleto/pagamento/taxa/fatura (isso é boleto) e NÃO use docs para reservar salão/churrasqueira/quadra (isso é reserva). "admin" para falar com administração/síndico/porteiro/atendimento. "greeting" para oi/olá/bom dia/boa tarde/boa noite/obrigado. Se estiver incerto, use other com confidence baixa.',
           },
           { role: 'user', content: JSON.stringify({ message }) },
         ],
@@ -750,6 +751,66 @@ async function classifyRoutingIntent(message: string) {
     return { intent, confidence };
   } catch {
     return { intent: 'other' as const, confidence: 0.0 };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function generateConversationalReply(params: {
+  signature: string;
+  preferredName: string;
+  hasUnit: boolean;
+  message: string;
+}) {
+  const apiKey = getOpenAiKey();
+  if (!apiKey) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4500);
+  try {
+    const model = getAiModel();
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.7,
+        max_tokens: 220,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Você é um assistente humano e cordial do condomínio. Responda em pt-BR de forma natural (sem parecer robô) e sem repetir frases padrão. Retorne SOMENTE JSON: {"reply": string, "ask_name": boolean, "suggest_menu": boolean}. Regras: se a mensagem for cumprimentando ou aleatória, cumprimente e ofereça ajuda. Se não tiver nome, prefira perguntar como a pessoa quer ser chamada. Se sugerir menu, inclua uma chamada curta (não liste itens aqui).',
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              signature: params.signature,
+              name: params.preferredName || null,
+              hasUnit: params.hasUnit,
+              message: params.message,
+            }),
+          },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    const json = await res.json().catch(() => null);
+    if (!res.ok) return null;
+    const content = String(json?.choices?.[0]?.message?.content ?? '');
+    const parsed = extractJsonObject(content) as any;
+    const reply = String(parsed?.reply ?? '').trim();
+    const askName = Boolean(parsed?.ask_name);
+    const suggestMenu = Boolean(parsed?.suggest_menu);
+    if (!reply) return null;
+    return { reply, askName, suggestMenu };
+  } catch {
+    return null;
   } finally {
     clearTimeout(timeout);
   }
@@ -1236,6 +1297,16 @@ export default async function handler(req: any, res: any) {
     let onboardingState = String(supportState || '').trim();
     const onboardingSeed = `${phoneDigits}:${messageId || ''}:${incomingText || ''}`;
 
+    if (!handledByLookup && incomingText && isMenuRequest(incomingText)) {
+      const finalText = signedText(signature, `Claro. Aqui estão as opções:\n\n${buildOptionsMenu()}`);
+      try {
+        await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+      } catch {
+      }
+      handledByLookup = true;
+    }
+
     if (!handledByLookup && incomingText && onboardingState === 'onboard_wait_name') {
       const quickIntent =
         isMenuChoice(incomingText) ||
@@ -1422,8 +1493,8 @@ export default async function handler(req: any, res: any) {
       if (aiIntent === 'docs' || looksLikeCondoQuestion(incomingText)) {
         const q = incomingText;
         const confirmTemplates = [
-          `Só confirmando: sua dúvida é esta?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
-          `Entendi. Você quer perguntar isso, certo?\n\n"${q}"\n\n1 = Sim\n2 = Não`,
+          `Só confirmando: é isso que você quer saber?\n\n"${q}"\n\nMe responda SIM ou NÃO.`,
+          `Entendi. Você quer perguntar isso, certo?\n\n"${q}"\n\nResponda sim/não.`,
         ];
         const confirm = signedText(signature, pickVariant(onboardingSeed, confirmTemplates));
         try {
@@ -1449,11 +1520,43 @@ export default async function handler(req: any, res: any) {
         }
         handledByLookup = true;
       } else {
+        const convo = await generateConversationalReply({
+          signature,
+          preferredName: nameForChat,
+          hasUnit: Boolean(clientApartment && clientBlock),
+          message: incomingText,
+        });
+
+        if (convo) {
+          const parts: string[] = [];
+          parts.push(convo.reply);
+          if (convo.suggestMenu) {
+            parts.push('');
+            parts.push(buildOptionsMenu());
+          }
+          const finalText = signedText(signature, parts.join('\n'));
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          } catch {
+          }
+          if (convo.askName && !preferredName) {
+            try {
+              await supabase
+                .from('clients')
+                .update({ support_state: 'onboard_wait_name', support_topic: 'onboarding', support_payload: {} })
+                .eq('phone', phoneDigits);
+              onboardingState = 'onboard_wait_name';
+            } catch {
+            }
+          }
+          handledByLookup = true;
+        }
+
         if (aiIntent === 'boleto' || aiIntent === 'reserva' || aiIntent === 'admin') {
           handledByLookup = false;
         }
 
-        if (!preferredName) {
+        if (!handledByLookup && !preferredName) {
           const extracted = extractPreferredName(incomingText, false);
           if (extracted) {
             try {
@@ -1509,7 +1612,7 @@ export default async function handler(req: any, res: any) {
           }
           handledByLookup = true;
           }
-        } else {
+        } else if (!handledByLookup) {
           if (clientApartment && clientBlock) {
             const menu = buildWelcomeMenu({ name: nameForChat, apartment: clientApartment, block: clientBlock });
             const finalText = signedText(signature, menu);
@@ -1646,7 +1749,7 @@ export default async function handler(req: any, res: any) {
           if (greetings.has(simplified)) {
             const finalText = signedText(
               signature,
-              `Para eu responder direitinho, me confirme com 1 (SIM) ou 2 (NÃO).\n\nSe preferir, você pode escolher uma opção agora:\n\n${buildOptionsMenu()}\n\nOu digite cancelar para sair desse passo.`,
+              `Para eu responder direitinho, me responda SIM ou NÃO.\n\nSe quiser ver as opções, digite MENU.\n\nOu digite cancelar para sair desse passo.`,
             );
             try {
               await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });

@@ -79,6 +79,11 @@ function isCancel(text: string) {
   return s === 'cancelar' || s === 'cancela' || s === '0' || s === 'sair' || s === 'voltar';
 }
 
+function isMenuRequest(text: string) {
+  const s = simplifyText(text);
+  return s === 'menu' || s === 'opcoes' || s === 'opcoes do menu' || s === 'opcao' || s === 'opções' || s === 'opções do menu';
+}
+
 export {
   simplifyText,
   isMenuChoice,
@@ -89,4 +94,5 @@ export {
   isAffirmative,
   isNegative,
   isCancel,
+  isMenuRequest,
 };
