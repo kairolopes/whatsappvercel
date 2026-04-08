@@ -685,6 +685,58 @@ async function decideWithChatGpt(input: { phone: string; message: string }) {
   }
 }
 
+async function classifyRoutingIntent(message: string) {
+  const apiKey = getOpenAiKey();
+  if (!apiKey) return { intent: 'other' as const, confidence: 0.0 };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
+  try {
+    const model = getAiModel();
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.0,
+        max_tokens: 220,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Classifique a intenção do usuário para um chatbot de condomínio. Responda SOMENTE JSON com campos: intent ("boleto"|"reserva"|"admin"|"docs"|"greeting"|"other"), confidence (0 a 1). Regras: (1) "docs" apenas quando for dúvida/regra do condomínio (convenção/regimento/horários/obra/pet/multa/vaga/barulho etc) e NÃO para cumprimentos. (2) "boleto" para 2ª via, boleto, taxa, fatura. (3) "reserva" para reservar salão/churrasqueira/quadra. (4) "admin" para falar com administração/síndico/porteiro/atendimento. (5) "greeting" para oi/olá/bom dia/boa tarde/boa noite/obrigado. Se estiver incerto, use other com confidence baixa.',
+          },
+          { role: 'user', content: JSON.stringify({ message }) },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    const json = await res.json().catch(() => null);
+    const content = String(json?.choices?.[0]?.message?.content ?? '');
+    const parsed = extractJsonObject(content) as any;
+    const intentRaw = String(parsed?.intent ?? 'other').trim().toLowerCase();
+    const confidence = Math.max(0, Math.min(1, Number(parsed?.confidence ?? 0) || 0));
+    const allowed = new Set(['boleto', 'reserva', 'admin', 'docs', 'greeting', 'other']);
+    const intent = (allowed.has(intentRaw) ? intentRaw : 'other') as
+      | 'boleto'
+      | 'reserva'
+      | 'admin'
+      | 'docs'
+      | 'greeting'
+      | 'other';
+    return { intent, confidence };
+  } catch {
+    return { intent: 'other' as const, confidence: 0.0 };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function answerWithCondoDocs(question: string) {
   const hits = await searchCondoDocs(question, 6).catch(() => [] as any[]);
   if (hits.length === 0) {
@@ -1303,13 +1355,29 @@ export default async function handler(req: any, res: any) {
       isRegimentoIntent(incomingText) ||
       isAdminIntent(incomingText);
 
-    if (!handledByLookup && incomingText && !isDocsFlow && !isOtherIntent) {
+    let aiIntent: 'boleto' | 'reserva' | 'admin' | 'docs' | 'greeting' | 'other' = 'other';
+    if (
+      incomingText &&
+      !isDocsFlow &&
+      !isOtherIntent &&
+      onboardingState !== 'onboard_wait_name' &&
+      onboardingState !== 'onboard_confirm_unit' &&
+      onboardingState !== 'onboard_wait_unit'
+    ) {
+      const ai = await classifyRoutingIntent(incomingText);
+      aiIntent = ai.intent;
+    }
+
+    const isOtherIntentWithAi =
+      isOtherIntent || aiIntent === 'boleto' || aiIntent === 'reserva' || aiIntent === 'admin' || aiIntent === 'docs';
+
+    if (!handledByLookup && incomingText && !isDocsFlow && !isOtherIntentWithAi) {
       const now = Date.now();
       const lastAtMs = lastAutoReplyAt ? Date.parse(String(lastAutoReplyAt)) : NaN;
       const tooSoon = Number.isFinite(lastAtMs) ? now - lastAtMs < 5000 : false;
       const sameMessage = Boolean(messageId) && Boolean(lastAutoReplyTo) && lastAutoReplyTo === String(messageId);
       if (!tooSoon && !sameMessage) {
-      if (looksLikeCondoQuestion(incomingText)) {
+      if (aiIntent === 'docs' || looksLikeCondoQuestion(incomingText)) {
         const q = incomingText;
         const confirmTemplates = [
           `Só confirmando: sua dúvida é esta?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
@@ -1339,6 +1407,10 @@ export default async function handler(req: any, res: any) {
         }
         handledByLookup = true;
       } else {
+        if (aiIntent === 'boleto' || aiIntent === 'reserva' || aiIntent === 'admin') {
+          handledByLookup = false;
+        }
+
         if (!preferredName) {
           const extracted = extractPreferredName(incomingText, false);
           if (extracted) {
@@ -1427,6 +1499,15 @@ export default async function handler(req: any, res: any) {
       const questionFromPayload = String(supportPayload?.question ?? '').trim();
 
       if (docsState === 'docs_confirm') {
+        const otherIntentNow =
+          isBoletoIntent(incomingText) || isReservaIntent(incomingText) || isAdminIntent(incomingText) || isRegimentoIntent(incomingText);
+        if (otherIntentNow && !isAffirmative(incomingText) && !isNegative(incomingText) && !isCancel(incomingText)) {
+          try {
+            await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = false;
+        } else
         if (isCancel(incomingText)) {
           const finalText = signedText(signature, 'Tudo bem. Se quiser, me diga qual é a sua dúvida sobre a Convenção ou Regimento Interno.');
           try {
@@ -1439,7 +1520,25 @@ export default async function handler(req: any, res: any) {
           }
           handledByLookup = true;
         } else if (isAffirmative(incomingText)) {
-          const q = questionFromPayload || incomingText;
+          const q = questionFromPayload || '';
+          const simplifiedQ = simplifyText(q);
+          const greetingSet = new Set(['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite']);
+          const invalidQ = !q || q.length < 8 || greetingSet.has(simplifiedQ);
+          if (invalidQ) {
+            const finalText = signedText(
+              signature,
+              `Entendi. Agora me diga qual é a sua dúvida sobre o condomínio (pode ser texto ou áudio).\n\nExemplos: horário de reforma, regras de pet, barulho, vaga, piscina, multa.\n\n${buildOptionsMenu()}`,
+            );
+            try {
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+              await supabase
+                .from('clients')
+                .update({ support_state: 'docs_wait_question', support_payload: {}, support_topic: supportTopic || 'regimento_convencao' })
+                .eq('phone', phoneDigits);
+            } catch {
+            }
+            handledByLookup = true;
+          } else {
           const result = await answerWithCondoDocs(q);
           const src = (result.sources || []).slice(0, 2);
           const lines: string[] = [];
@@ -1484,6 +1583,7 @@ export default async function handler(req: any, res: any) {
           } catch {
           }
           handledByLookup = true;
+          }
         } else if (isNegative(incomingText)) {
           const finalText = signedText(
             signature,
@@ -1593,7 +1693,7 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    if (!handledByLookup && incomingText && isBoletoIntent(incomingText)) {
+    if (!handledByLookup && incomingText && (isBoletoIntent(incomingText) || aiIntent === 'boleto')) {
       if (!clientUnitId) {
         const replyBody = `Olá, ${nameForChat}. Não consegui identificar sua unidade para buscar boletos. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
         const finalText = signedText(signature, replyBody);
@@ -1841,7 +1941,7 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    if (!handledByLookup && incomingText && isReservaIntent(incomingText)) {
+    if (!handledByLookup && incomingText && (isReservaIntent(incomingText) || aiIntent === 'reserva')) {
       const reservaUrl = getReservaUrl();
       const lines: string[] = [];
       lines.push(`Olá, ${nameForChat}.`);
@@ -1880,7 +1980,7 @@ export default async function handler(req: any, res: any) {
       handledByLookup = true;
     }
 
-    if (!handledByLookup && incomingText && isRegimentoIntent(incomingText)) {
+    if (!handledByLookup && incomingText && (isRegimentoIntent(incomingText) || aiIntent === 'docs')) {
       const prompt =
         'Claro — me diga qual é a sua dúvida sobre a Convenção ou o Regimento Interno.\n\n' +
         'Você pode digitar ou enviar um áudio.\n\n' +
@@ -1921,7 +2021,7 @@ export default async function handler(req: any, res: any) {
       handledByLookup = true;
     }
 
-    if (!handledByLookup && incomingText && isAdminIntent(incomingText)) {
+    if (!handledByLookup && incomingText && (isAdminIntent(incomingText) || aiIntent === 'admin')) {
       const adminPhone = getAdminForwardPhone();
       const ack = signedText(signature, 'Certo. Vou encaminhar sua mensagem para a Administração.');
 
@@ -1981,10 +2081,10 @@ export default async function handler(req: any, res: any) {
       shouldAutoReply() &&
       incomingText &&
       !isMenuChoice(incomingText) &&
-      !isBoletoIntent(incomingText) &&
-      !isReservaIntent(incomingText) &&
-      !isRegimentoIntent(incomingText) &&
-      !isAdminIntent(incomingText);
+      !(isBoletoIntent(incomingText) || aiIntent === 'boleto') &&
+      !(isReservaIntent(incomingText) || aiIntent === 'reserva') &&
+      !(isRegimentoIntent(incomingText) || aiIntent === 'docs') &&
+      !(isAdminIntent(incomingText) || aiIntent === 'admin');
 
     if (!handledByLookup && shouldSendMenu) {
       const now = Date.now();
