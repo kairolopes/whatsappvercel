@@ -230,6 +230,15 @@ function buildWelcomeMenu(params: { name: string; apartment: string; block: stri
   );
 }
 
+function buildOptionsMenu() {
+  return (
+    `1 - Boleto\n` +
+    `2 - Reservar ambiente\n` +
+    `3 - Falar com a Administração / Síndico\n` +
+    `4 - Dúvidas sobre o condomínio (Convenção/Regimento)`
+  );
+}
+
 function getAiSignatureName(): string {
   const s = String(process.env.MAKE_SIGNATURE_NAME || 'Síndico X').trim();
   return s || 'Síndico X';
@@ -1165,7 +1174,8 @@ export default async function handler(req: any, res: any) {
           'Claro. Qual é o seu nome?',
           'Pode me dizer seu nome para eu te chamar direitinho?',
         ];
-        const finalText = signedText(signature, pickVariant(onboardingSeed, variants));
+        const prompt = pickVariant(onboardingSeed, variants);
+        const finalText = signedText(signature, `${prompt}\n\nPosso te ajudar com:\n\n${buildOptionsMenu()}`);
         try {
           await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
         } catch {
@@ -1197,7 +1207,8 @@ export default async function handler(req: any, res: any) {
             `Prazer, ${extracted}. Você está vinculado(a) a qual unidade?\n\n` +
             `- Apartamento/Bloco (ex: Bloco 07, Apto 0107)\n` +
             `- Casa/Quadra/Lote/Unidade (ex: Quadra A, Lote 12)\n\n` +
-            `Me envie como texto para eu encaminhar à Administração e vincular.`;
+            `Me envie como texto para eu encaminhar à Administração e vincular.\n\n` +
+            `Enquanto isso, posso te ajudar com:\n\n${buildOptionsMenu()}`;
           const finalText = signedText(signature, askUnit);
           try {
             await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
@@ -1242,13 +1253,7 @@ export default async function handler(req: any, res: any) {
       ];
       const ack = pickVariant(onboardingSeed, ackVariants);
 
-      const menu =
-        `1 - Boleto\n` +
-        `2 - Reservar ambiente\n` +
-        `3 - Falar com a Administração / Síndico\n` +
-        `4 - Dúvidas sobre o condomínio (Convenção/Regimento)`;
-
-      const finalText = signedText(signature, `${ack}\n\n${menu}`);
+      const finalText = signedText(signature, `${ack}\n\n${buildOptionsMenu()}`);
       try {
         await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
       } catch {
@@ -1381,7 +1386,8 @@ export default async function handler(req: any, res: any) {
             `Oi! Aqui é o ${signature}. Qual é o seu nome?`,
             `Olá! Sou o ${signature}. Me diz seu nome para eu te atender melhor?`,
           ];
-          const finalText = signedText(signature, pickVariant(onboardingSeed, helloVariants));
+          const prompt = pickVariant(onboardingSeed, helloVariants);
+          const finalText = signedText(signature, `${prompt}\n\nPosso te ajudar com:\n\n${buildOptionsMenu()}`);
           try {
             await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
             await supabase.from('clients').update({ support_state: 'onboard_wait_name', support_topic: 'onboarding', support_payload: {} }).eq('phone', phoneDigits);
@@ -1402,7 +1408,8 @@ export default async function handler(req: any, res: any) {
             const ask =
               `Entendi, ${nameForChat}. Você está vinculado(a) a qual unidade?\n\n` +
               `- Apartamento/Bloco (ex: Bloco 07, Apto 0107)\n` +
-              `- Casa/Quadra/Lote/Unidade (ex: Quadra A, Lote 12)`;
+              `- Casa/Quadra/Lote/Unidade (ex: Quadra A, Lote 12)\n\n` +
+              `Enquanto isso, posso te ajudar com:\n\n${buildOptionsMenu()}`;
             const finalText = signedText(signature, ask);
             try {
               await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
