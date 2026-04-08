@@ -1,4 +1,12 @@
 {
+  "functions": {
+    "api/**/*.ts": {
+      "includeFiles": [
+        "api/lib/condoDocs.index.json",
+        "*.pdf"
+      ]
+    }
+  },
   "routes": [
     { "handle": "filesystem" },
     { "src": "^/api/zapi/(.*)$", "dest": "/api/zapi?route=$1" },
