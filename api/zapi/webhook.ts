@@ -106,6 +106,26 @@ function isMenuChoice(text: string) {
   return t === '1' || t === '2' || t === '3' || t === '4';
 }
 
+function simplifyText(input: string) {
+  return String(input || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isBoletoIntent(text: string) {
+  const s = simplifyText(text);
+  if (!s) return false;
+  if (s === '1') return true;
+  if (s.includes('boleto')) return true;
+  if (s.includes('2 via') || s.includes('segunda via')) return true;
+  return false;
+}
+
 function buildWelcomeMenu(params: { name: string; apartment: string; block: string }) {
   const name = String(params.name || '').trim() || 'morador';
   const apartment = String(params.apartment || '').trim();
@@ -218,6 +238,112 @@ async function fetchSuperlogicaPage(page: number) {
       throw err;
     }
     return data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchSuperlogicaCobranca(unitId: string) {
+  const cfg = getSuperlogicaConfig();
+  if (!cfg) throw new Error('missing_superlogica_env');
+
+  const url = `https://api.superlogica.net/v2/condor/cobranca/index?idCondominio=${encodeURIComponent(cfg.condominioId)}&UNIDADES[0]=${encodeURIComponent(
+    String(unitId),
+  )}&itensPorPagina=50&pagina=1`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        app_token: cfg.appToken,
+        access_token: cfg.accessToken,
+        Accept: 'application/json',
+      } as any,
+      signal: controller.signal,
+    });
+    const contentType = res.headers.get('content-type') ?? '';
+    const data = contentType.includes('application/json') ? await res.json().catch(() => null) : await res.text().catch(() => null);
+    if (!res.ok) {
+      const err: any = new Error('superlogica_cobranca_error');
+      err.status = res.status;
+      err.details = data;
+      throw err;
+    }
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function collectRecebimentos(payload: any) {
+  const out: { id: string; due?: string; amount?: string }[] = [];
+  const seen = new Set<string>();
+  const stack: any[] = [payload];
+
+  while (stack.length) {
+    const cur = stack.pop();
+    if (!cur || typeof cur !== 'object') continue;
+    if (Array.isArray(cur)) {
+      for (const v of cur) stack.push(v);
+      continue;
+    }
+
+    const rec = cur as Record<string, any>;
+    const id = String(rec.id_recebimento_recb ?? '').trim();
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      const due = String(rec.dt_vencimento_recb ?? rec.dt_vencimento ?? '').trim() || undefined;
+      const amount = String(rec.vl_valor_recb ?? rec.vl_valor ?? '').trim() || undefined;
+      out.push({ id, due, amount });
+    }
+
+    for (const v of Object.values(rec)) {
+      if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+
+  return out;
+}
+
+async function fetchSuperlogicaSegundaViaLink(recebimentoId: string) {
+  const cfg = getSuperlogicaConfig();
+  if (!cfg) throw new Error('missing_superlogica_env');
+
+  const url = `https://api.superlogica.net/v2/condor/cobranca/gerarlinksegundavia?ID_CONDOMINIO_COND=${encodeURIComponent(
+    cfg.condominioId,
+  )}&ID_RECEBIMENTO_RECB=${encodeURIComponent(String(recebimentoId))}&DT_VENCIMENTO_RECB=01/01/2025&DT_ATUALIZACAO_VENCIMENTO=12/31/2026`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        app_token: cfg.appToken,
+        access_token: cfg.accessToken,
+        Accept: 'application/json',
+      } as any,
+      signal: controller.signal,
+    });
+
+    const contentType = res.headers.get('content-type') ?? '';
+    const data = contentType.includes('application/json') ? await res.json().catch(() => null) : await res.text().catch(() => null);
+    if (!res.ok) {
+      const err: any = new Error('superlogica_segundavia_error');
+      err.status = res.status;
+      err.details = data;
+      throw err;
+    }
+
+    if (typeof data === 'string') {
+      const s = data.trim();
+      if (s.startsWith('http')) return s;
+    }
+
+    const link = findValueByKeys(data, ['link', 'url', 'st_link', 'st_url', 'st_link_recb', 'st_linkboleto_recb']);
+    return link;
   } finally {
     clearTimeout(timeout);
   }
@@ -694,6 +820,7 @@ export default async function handler(req: any, res: any) {
     const phoneDigits = normalizeDigits(phone);
     const isPhoneNumber = phoneDigits.length >= 10;
     const signature = getAiSignatureName();
+    const incomingText = typeof text === 'string' ? text.trim() : '';
     let isNewClient = false;
     let needsLookup = false;
     let clientUnitId = '';
@@ -774,12 +901,142 @@ export default async function handler(req: any, res: any) {
       }
     }
 
+    if (msg.kind === 'text' && incomingText && isBoletoIntent(incomingText)) {
+      if (!clientUnitId) {
+        const replyBody = `Olá, ${senderDisplayName}. Não consegui identificar sua unidade para buscar boletos. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
+        const finalText = signedText(signature, replyBody);
+        try {
+          const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+          await supabase.from('messages').insert([
+            {
+              conversation_id: upsertedConv.id,
+              text: finalText,
+              sender: 'user',
+              timestamp: formatTimeHM(new Date()),
+              status: 'sent',
+              external_id: externalId || null,
+              kind: 'text',
+              meta: { superlogica: true, action: 'boleto', missing_unit: true },
+            },
+          ]);
+          await supabase
+            .from('conversations')
+            .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+            .eq('id', upsertedConv.id);
+        } catch {
+        }
+
+        handledByLookup = true;
+      } else {
+        try {
+          const cobranca = await fetchSuperlogicaCobranca(clientUnitId);
+          const recebimentos = collectRecebimentos(cobranca);
+          const picked = recebimentos.slice(0, 3);
+          if (picked.length === 0) {
+            const replyBody = `Olá, ${senderDisplayName}. Não encontrei boletos para sua unidade no momento.`;
+            const finalText = signedText(signature, replyBody);
+            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+            await supabase.from('messages').insert([
+              {
+                conversation_id: upsertedConv.id,
+                text: finalText,
+                sender: 'user',
+                timestamp: formatTimeHM(new Date()),
+                status: 'sent',
+                external_id: externalId || null,
+                kind: 'text',
+                meta: { superlogica: true, action: 'boleto', unit_id: clientUnitId },
+              },
+            ]);
+            await supabase
+              .from('conversations')
+              .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+              .eq('id', upsertedConv.id);
+          } else {
+            const links: { id: string; link: string; due?: string; amount?: string }[] = [];
+            for (const r of picked) {
+              const link = await fetchSuperlogicaSegundaViaLink(r.id);
+              if (link) links.push({ id: r.id, link, due: r.due, amount: r.amount });
+            }
+
+            const lines: string[] = [];
+            if (links.length === 0) {
+              lines.push('Não consegui gerar o link da 2ª via agora.');
+            } else if (links.length === 1) {
+              lines.push(`Segue a 2ª via do boleto:`);
+              lines.push(links[0].link);
+            } else {
+              lines.push('Seguem as 2ª vias dos seus boletos:');
+              links.forEach((l, idx) => {
+                const extra = [l.due ? `venc. ${l.due}` : '', l.amount ? `valor ${l.amount}` : ''].filter(Boolean).join(' · ');
+                lines.push(`${idx + 1}) ${extra ? `${extra} — ` : ''}${l.link}`);
+              });
+            }
+
+            const finalText = signedText(signature, lines.join('\n'));
+            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+            await supabase.from('messages').insert([
+              {
+                conversation_id: upsertedConv.id,
+                text: finalText,
+                sender: 'user',
+                timestamp: formatTimeHM(new Date()),
+                status: 'sent',
+                external_id: externalId || null,
+                kind: 'text',
+                meta: { superlogica: true, action: 'boleto', unit_id: clientUnitId, links },
+              },
+            ]);
+            await supabase
+              .from('conversations')
+              .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+              .eq('id', upsertedConv.id);
+          }
+
+          await supabase
+            .from('clients')
+            .update({ last_auto_reply_at: new Date().toISOString(), last_auto_reply_to: messageId || null })
+            .eq('phone', phoneDigits);
+        } catch {
+          const replyBody = `Olá, ${senderDisplayName}. Tive um problema ao consultar seus boletos agora. Tente novamente em instantes.`;
+          const finalText = signedText(signature, replyBody);
+          try {
+            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+            await supabase.from('messages').insert([
+              {
+                conversation_id: upsertedConv.id,
+                text: finalText,
+                sender: 'user',
+                timestamp: formatTimeHM(new Date()),
+                status: 'sent',
+                external_id: externalId || null,
+                kind: 'text',
+                meta: { superlogica: true, action: 'boleto', unit_id: clientUnitId, error: true },
+              },
+            ]);
+            await supabase
+              .from('conversations')
+              .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+              .eq('id', upsertedConv.id);
+          } catch {
+          }
+        }
+
+        handledByLookup = true;
+      }
+    }
+
     const shouldSendMenu =
       shouldAutoReply() &&
       msg.kind === 'text' &&
       typeof text === 'string' &&
       text.trim() &&
-      !isMenuChoice(text.trim());
+      !isMenuChoice(text.trim()) &&
+      !isBoletoIntent(text.trim());
 
     if (shouldSendMenu) {
       const now = Date.now();

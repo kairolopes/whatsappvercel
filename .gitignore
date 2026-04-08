@@ -25,3 +25,5 @@ dist-ssr
 *.sw?
 .vercel
 .trae
+.vercel_appdata_local
+.vercel_appdata_roaming
