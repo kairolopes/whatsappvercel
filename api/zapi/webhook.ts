@@ -1492,37 +1492,51 @@ export default async function handler(req: any, res: any) {
           }
           handledByLookup = true;
         } else {
-          const q = incomingText;
-          const confirm = signedText(
-            signature,
-            `Só confirmando: você quer tirar a seguinte dúvida?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
-          );
-          try {
-            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
-            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
-            await supabase.from('messages').insert([
-              {
-                conversation_id: upsertedConv.id,
-                text: confirm,
-                sender: 'user',
-                timestamp: formatTimeHM(new Date()),
-                status: 'sent',
-                external_id: externalId || null,
-                kind: 'text',
-                meta: { action: 'docs_confirm_prompt', ai: true, question: q },
-              },
-            ]);
-            await supabase
-              .from('conversations')
-              .update({ last_message: confirm, last_message_time: formatTimeHM(new Date()) })
-              .eq('id', upsertedConv.id);
-            await supabase
-              .from('clients')
-              .update({ support_state: 'docs_confirm', support_topic: supportTopic || 'regimento_convencao', support_payload: { question: q } })
-              .eq('phone', phoneDigits);
-          } catch {
+          const simplified = simplifyText(incomingText);
+          const greetings = new Set(['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite']);
+          if (greetings.has(simplified)) {
+            const finalText = signedText(
+              signature,
+              'Para eu responder direitinho, me confirme com 1 (SIM) ou 2 (NÃO). Se quiser voltar ao menu, digite cancelar.',
+            );
+            try {
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            } catch {
+            }
+            handledByLookup = true;
+          } else {
+            const q = incomingText;
+            const confirm = signedText(
+              signature,
+              `Só confirmando: você quer tirar a seguinte dúvida?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
+            );
+            try {
+              const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+              const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+              await supabase.from('messages').insert([
+                {
+                  conversation_id: upsertedConv.id,
+                  text: confirm,
+                  sender: 'user',
+                  timestamp: formatTimeHM(new Date()),
+                  status: 'sent',
+                  external_id: externalId || null,
+                  kind: 'text',
+                  meta: { action: 'docs_confirm_prompt', ai: true, question: q },
+                },
+              ]);
+              await supabase
+                .from('conversations')
+                .update({ last_message: confirm, last_message_time: formatTimeHM(new Date()) })
+                .eq('id', upsertedConv.id);
+              await supabase
+                .from('clients')
+                .update({ support_state: 'docs_confirm', support_topic: supportTopic || 'regimento_convencao', support_payload: { question: q } })
+                .eq('phone', phoneDigits);
+            } catch {
+            }
+            handledByLookup = true;
           }
-          handledByLookup = true;
         }
       } else if (docsState === 'docs_wait_question' || docsState === 'docs_active') {
         if (isCancel(incomingText)) {
