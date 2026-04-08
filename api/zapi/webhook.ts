@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { searchCondoDocs } from '../lib/condoDocs';
+import { searchCondoDocs } from '../lib/condoDocs.js';
 
 type AnyRecord = Record<string, unknown>;
 
