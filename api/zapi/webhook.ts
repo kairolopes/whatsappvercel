@@ -1541,33 +1541,52 @@ export default async function handler(req: any, res: any) {
       if (!tooSoon && !sameMessage) {
       if (aiIntent === 'docs' || looksLikeCondoQuestion(incomingText)) {
         const q = incomingText;
-        const confirmTemplates = [
-          `Só confirmando: é isso que você quer saber?\n\n"${q}"\n\nMe responda SIM ou NÃO.`,
-          `Entendi. Você quer perguntar isso, certo?\n\n"${q}"\n\nResponda sim/não.`,
-        ];
-        const confirm = signedText(signature, pickVariant(onboardingSeed, confirmTemplates));
-        try {
-          const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
-          const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
-          await supabase.from('messages').insert([
-            {
-              conversation_id: upsertedConv.id,
-              text: confirm,
-              sender: 'user',
-              timestamp: formatTimeHM(new Date()),
-              status: 'sent',
-              external_id: externalId || null,
-              kind: 'text',
-              meta: { action: 'docs_confirm_prompt', ai: true, question: q },
-            },
-          ]);
-          await supabase
-            .from('clients')
-            .update({ support_state: 'docs_confirm', support_topic: 'regimento_convencao', support_payload: { question: q } })
-            .eq('phone', phoneDigits);
-        } catch {
+        const ai = await classifyRoutingIntent(q);
+        const clearlyDocs = (ai.intent === 'docs' && ai.confidence >= 0.6) || (q.includes('?') && q.length >= 10) || looksLikeCondoQuestion(q);
+
+        if (!clearlyDocs) {
+          const finalText = signedText(
+            signature,
+            `Entendi. Só para eu acertar: sua dúvida é sobre qual tema do condomínio?\n\nEx.: obra/reforma, barulho, pet, vaga, piscina, visitantes, multa.`,
+          );
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            await supabase
+              .from('clients')
+              .update({ support_state: 'docs_wait_question', support_topic: 'regimento_convencao', support_payload: {} })
+              .eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        } else {
+          const result = await answerWithCondoDocs(q);
+          const src = (result.sources || []).slice(0, 2);
+          const lines: string[] = [];
+          lines.push(result.answer);
+          if (src.length) {
+            lines.push('');
+            lines.push('Onde encontrei:');
+            for (const s of src) lines.push(`${s.doc}, pág. ${s.page}`);
+            const excerpt = String(src[0]?.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
+            if (excerpt) {
+              lines.push('');
+              lines.push(`Trecho: "${excerpt}"`);
+            }
+          }
+          lines.push('');
+          lines.push('Se eu tiver entendido algo errado, me corrija e eu refaço a busca.');
+
+          const finalText = signedText(signature, lines.join('\n'));
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            await supabase
+              .from('clients')
+              .update({ support_state: 'docs_active', support_topic: 'regimento_convencao', support_payload: {} })
+              .eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
         }
-        handledByLookup = true;
       } else {
         const convo = await generateConversationalReply({
           signature,
