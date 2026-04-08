@@ -134,7 +134,20 @@ export default async function handler(req: AnyReq, res: AnyRes) {
       String(process.env.COMMIT_SHA || '') ||
       '';
 
-    json(res, 200, { ok: true, sha: gitSha || null, deployedAt: new Date().toISOString() });
+    const deploymentId = String(process.env.VERCEL_DEPLOYMENT_ID || '').trim();
+    const vercelEnv = String(process.env.VERCEL_ENV || '').trim();
+    const region = String(process.env.VERCEL_REGION || '').trim();
+    const vercelUrl = String(process.env.VERCEL_URL || '').trim();
+
+    json(res, 200, {
+      ok: true,
+      sha: gitSha || null,
+      deploymentId: deploymentId || null,
+      env: vercelEnv || null,
+      region: region || null,
+      url: vercelUrl ? `https://${vercelUrl}` : null,
+      serverTime: new Date().toISOString(),
+    });
     return;
   }
 
