@@ -127,6 +127,17 @@ export default async function handler(req: AnyReq, res: AnyRes) {
 
   const route = normalizeRoute(req.query?.route);
 
+  if (route === 'version' && req.method === 'GET') {
+    const gitSha =
+      String(process.env.VERCEL_GIT_COMMIT_SHA || '') ||
+      String(process.env.GIT_COMMIT_SHA || '') ||
+      String(process.env.COMMIT_SHA || '') ||
+      '';
+
+    json(res, 200, { ok: true, sha: gitSha || null, deployedAt: new Date().toISOString() });
+    return;
+  }
+
   if (route === 'login' && req.method === 'POST') {
     const expected = process.env.ADMIN_API_KEY;
     const builtInSharedSecret = 'rokzap_2026_03_29_a8d2b7c1f4e9';
@@ -168,6 +179,7 @@ export default async function handler(req: AnyReq, res: AnyRes) {
         routes: [
           'login',
           'logout',
+          'version',
           'contacts',
           'chats',
           'chat-messages',
