@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import { PDFParse } from 'pdf-parse';
 
 type DocPage = {
   docName: string;
@@ -59,6 +58,10 @@ function pickDocsFromRoot(rootDir: string) {
 async function loadDocPagesFromFile(rootDir: string, docName: string, fileName: string): Promise<DocPage[]> {
   const fullPath = path.join(rootDir, fileName);
   const buf = fs.readFileSync(fullPath);
+  const mod: any = await import('pdf-parse');
+  const PDFParse = mod?.PDFParse as any;
+  if (!PDFParse) return [];
+
   const parser = new PDFParse({ data: buf });
   try {
     const textResult: any = await parser.getText();
@@ -81,6 +84,27 @@ export async function loadCondoDocsPages() {
   if (cache && Date.now() - cache.loadedAt < ttlMs) return cache.pages;
 
   const rootDir = process.cwd();
+
+  try {
+    const indexPath = path.join(rootDir, 'api', 'lib', 'condoDocs.index.json');
+    if (fs.existsSync(indexPath)) {
+      const raw = fs.readFileSync(indexPath, 'utf8');
+      const parsed: any = JSON.parse(raw);
+      const pages = Array.isArray(parsed?.pages) ? parsed.pages : [];
+      const normalized: DocPage[] = pages
+        .map((p: any) => ({
+          docName: String(p?.docName ?? '').trim(),
+          fileName: String(p?.fileName ?? '').trim(),
+          page: Number(p?.page ?? 0) || 0,
+          text: String(p?.text ?? '').trim(),
+        }))
+        .filter((p) => p.docName && p.fileName && p.page > 0 && p.text && p.text.length > 20);
+      cache = { pages: normalized, loadedAt: Date.now() };
+      return normalized;
+    }
+  } catch {
+  }
+
   const docs = pickDocsFromRoot(rootDir);
   const pages: DocPage[] = [];
   for (const d of docs) {
