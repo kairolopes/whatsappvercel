@@ -1,5 +1,17 @@
 import { createClient } from '@supabase/supabase-js';
 import { searchCondoDocs } from '../lib/condoDocs.js';
+import {
+  isAdminIntent,
+  isAffirmative,
+  isBoletoIntent,
+  isCancel,
+  isMenuChoice,
+  isNegative,
+  isRegimentoIntent,
+  isReservaIntent,
+  simplifyText,
+} from '../lib/intents.js';
+import { transcribeAudioFromUrl } from '../lib/voice.js';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -100,62 +112,6 @@ function signedText(signatureName: string, message: string): string {
   const base = String(message ?? '').trim();
   const prefix = `*${signatureName}*`;
   return base ? `${prefix}\n${base}` : prefix;
-}
-
-function isMenuChoice(text: string) {
-  const t = String(text || '').trim();
-  return t === '1' || t === '2' || t === '3' || t === '4';
-}
-
-function simplifyText(input: string) {
-  return String(input || '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function isBoletoIntent(text: string) {
-  const s = simplifyText(text);
-  if (!s) return false;
-  if (s === '1') return true;
-  if (s.includes('boleto')) return true;
-  if (s.includes('2 via') || s.includes('segunda via')) return true;
-  return false;
-}
-
-function isReservaIntent(text: string) {
-  const s = simplifyText(text);
-  if (!s) return false;
-  if (s === '2') return true;
-  if (s.includes('reserva')) return true;
-  if (s.includes('reservar')) return true;
-  if (s.includes('salão') || s.includes('salao')) return true;
-  if (s.includes('churrasqueira')) return true;
-  if (s.includes('quadra')) return true;
-  return false;
-}
-
-function isRegimentoIntent(text: string) {
-  const s = simplifyText(text);
-  if (!s) return false;
-  if (s === '3') return true;
-  if (s.includes('regimento')) return true;
-  if (s.includes('convencao') || s.includes('convenção')) return true;
-  return false;
-}
-
-function isAdminIntent(text: string) {
-  const s = simplifyText(text);
-  if (!s) return false;
-  if (s === '4') return true;
-  if (s.includes('administracao') || s.includes('administração')) return true;
-  if (s.includes('administrador')) return true;
-  if (s.includes('falar com')) return true;
-  return false;
 }
 
 function normalizeDigitsOnly(value: unknown) {
@@ -1000,7 +956,7 @@ export default async function handler(req: any, res: any) {
     const phoneDigits = normalizeDigits(phone);
     const isPhoneNumber = phoneDigits.length >= 10;
     const signature = getAiSignatureName();
-    const incomingText = typeof text === 'string' ? text.trim() : '';
+    let incomingText = typeof text === 'string' ? text.trim() : '';
     let isNewClient = false;
     let needsLookup = false;
     let clientUnitId = '';
@@ -1010,11 +966,37 @@ export default async function handler(req: any, res: any) {
     let lastAutoReplyAt: string | null = null;
     let supportState = '';
     let supportTopic = '';
+    let supportPayload: any = {};
+
+    if (msg.kind === 'audio' && !incomingText) {
+      const audioUrl = typeof (msg.meta as any)?.url === 'string' ? String((msg.meta as any).url).trim() : '';
+      const mimeType = typeof (msg.meta as any)?.mimeType === 'string' ? String((msg.meta as any).mimeType).trim() : '';
+      const apiKey = getOpenAiKey();
+      if (audioUrl && apiKey) {
+        try {
+          const stt = await transcribeAudioFromUrl({ openAiApiKey: apiKey, audioUrl, mimeType });
+          if (stt?.text) {
+            incomingText = stt.text;
+            if (messageId) {
+              try {
+                await supabase
+                  .from('messages')
+                  .update({ meta: { ...(msg.meta as any), transcript: stt.text, transcript_model: stt.model } })
+                  .eq('conversation_id', upsertedConv.id)
+                  .eq('external_id', messageId);
+              } catch {
+              }
+            }
+          }
+        } catch {
+        }
+      }
+    }
 
     try {
       const { data: existingClient } = await supabase
         .from('clients')
-        .select('phone,status,matched,unit_id,block,apartment,last_auto_reply_to,last_auto_reply_at,support_state,support_topic')
+        .select('phone,status,matched,unit_id,block,apartment,last_auto_reply_to,last_auto_reply_at,support_state,support_topic,support_payload')
         .eq('phone', phoneDigits)
         .maybeSingle();
 
@@ -1043,6 +1025,7 @@ export default async function handler(req: any, res: any) {
         lastAutoReplyAt = (existingClient as any)?.last_auto_reply_at ?? null;
         supportState = String((existingClient as any)?.support_state ?? '').trim();
         supportTopic = String((existingClient as any)?.support_topic ?? '').trim();
+        supportPayload = (existingClient as any)?.support_payload && typeof (existingClient as any)?.support_payload === 'object' ? (existingClient as any).support_payload : {};
         await supabase
           .from('clients')
           .update({ whatsapp_name: senderDisplayName, whatsapp_photo_url: avatarUrl })
@@ -1085,66 +1068,148 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    const shouldHandleDocQuestion =
-      msg.kind === 'text' &&
-      incomingText &&
-      (supportState === 'docs_wait_question' || supportState === 'docs_active') &&
-      !isMenuChoice(incomingText) &&
-      !isBoletoIntent(incomingText) &&
-      !isReservaIntent(incomingText) &&
-      !isRegimentoIntent(incomingText) &&
-      !isAdminIntent(incomingText);
+    const docsState = String(supportState || '').trim();
+    const isDocsFlow = docsState.startsWith('docs_');
 
-    if (!handledByLookup && shouldHandleDocQuestion) {
-      const result = await answerWithCondoDocs(incomingText);
-      const src = (result.sources || []).slice(0, 2);
-      const lines: string[] = [];
-      lines.push(result.answer);
-      if (src.length) {
-        lines.push('');
-        lines.push('Onde encontrei:');
-        for (const s of src) {
-          lines.push(`${s.doc}, pág. ${s.page}`);
-        }
-        const excerpt = String(src[0]?.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
-        if (excerpt) {
-          lines.push('');
-          lines.push(`Trecho: "${excerpt}"`);
-        }
-      }
-      lines.push('');
-      lines.push('Quer que eu procure mais detalhes, ou prefere falar com a Administração? (Responda 4)');
-
-      const finalText = signedText(signature, lines.join('\n'));
+    if (!handledByLookup && isDocsFlow && msg.kind === 'audio' && !incomingText) {
+      const finalText = signedText(
+        signature,
+        'Eu recebi seu áudio, mas não consegui transcrever com clareza. Você pode digitar sua dúvida (ou enviar um áudio mais curto)?',
+      );
       try {
-        const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-        const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
-        await supabase.from('messages').insert([
-          {
-            conversation_id: upsertedConv.id,
-            text: finalText,
-            sender: 'user',
-            timestamp: formatTimeHM(new Date()),
-            status: 'sent',
-            external_id: externalId || null,
-            kind: 'text',
-            meta: { action: 'docs_answer', ai: true, sources: src },
-          },
-        ]);
-        await supabase
-          .from('conversations')
-          .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-          .eq('id', upsertedConv.id);
-        await supabase
-          .from('clients')
-          .update({ support_state: 'docs_active', support_topic: supportTopic || 'docs', support_started_at: new Date().toISOString() })
-          .eq('phone', phoneDigits);
+        await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
       } catch {
       }
       handledByLookup = true;
     }
 
-    if (msg.kind === 'text' && incomingText && isBoletoIntent(incomingText)) {
+    const isOtherIntent =
+      isMenuChoice(incomingText) ||
+      isBoletoIntent(incomingText) ||
+      isReservaIntent(incomingText) ||
+      isRegimentoIntent(incomingText) ||
+      isAdminIntent(incomingText);
+
+    if (!handledByLookup && incomingText && isDocsFlow && (docsState === 'docs_confirm' || !isOtherIntent)) {
+      const questionFromPayload = String(supportPayload?.question ?? '').trim();
+
+      if (docsState === 'docs_confirm') {
+        if (isCancel(incomingText)) {
+          const finalText = signedText(signature, 'Tudo bem. Se quiser, me diga qual é a sua dúvida sobre a Convenção ou Regimento Interno.');
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            await supabase
+              .from('clients')
+              .update({ support_state: 'docs_wait_question', support_payload: {}, support_topic: supportTopic || 'regimento_convencao' })
+              .eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        } else if (isAffirmative(incomingText)) {
+          const q = questionFromPayload || incomingText;
+          const result = await answerWithCondoDocs(q);
+          const src = (result.sources || []).slice(0, 2);
+          const lines: string[] = [];
+          lines.push(result.answer);
+          if (src.length) {
+            lines.push('');
+            lines.push('Onde encontrei:');
+            for (const s of src) lines.push(`${s.doc}, pág. ${s.page}`);
+            const excerpt = String(src[0]?.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
+            if (excerpt) {
+              lines.push('');
+              lines.push(`Trecho: "${excerpt}"`);
+            }
+          }
+          lines.push('');
+          lines.push('Quer que eu procure mais detalhes, ou prefere falar com a Administração? (Responda 4)');
+
+          const finalText = signedText(signature, lines.join('\n'));
+          try {
+            const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+            await supabase.from('messages').insert([
+              {
+                conversation_id: upsertedConv.id,
+                text: finalText,
+                sender: 'user',
+                timestamp: formatTimeHM(new Date()),
+                status: 'sent',
+                external_id: externalId || null,
+                kind: 'text',
+                meta: { action: 'docs_answer', ai: true, sources: src, question: q },
+              },
+            ]);
+            await supabase
+              .from('conversations')
+              .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+              .eq('id', upsertedConv.id);
+            await supabase
+              .from('clients')
+              .update({ support_state: 'docs_active', support_topic: supportTopic || 'regimento_convencao', support_payload: {} })
+              .eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        } else if (isNegative(incomingText)) {
+          const finalText = signedText(
+            signature,
+            'Sem problemas. Pode me dizer novamente qual é a sua dúvida? Se puder, cite o tema (barulho, obra, pet, vaga, piscina, multa, etc.).',
+          );
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            await supabase
+              .from('clients')
+              .update({ support_state: 'docs_wait_question', support_payload: {}, support_topic: supportTopic || 'regimento_convencao' })
+              .eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        } else {
+          const q = incomingText;
+          const confirm = signedText(
+            signature,
+            `Só confirmando: você quer tirar a seguinte dúvida?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
+          );
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+            await supabase
+              .from('clients')
+              .update({ support_state: 'docs_confirm', support_topic: supportTopic || 'regimento_convencao', support_payload: { question: q } })
+              .eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        }
+      } else if (docsState === 'docs_wait_question' || docsState === 'docs_active') {
+        if (isCancel(incomingText)) {
+          const finalText = signedText(signature, 'Tudo bem. Posso te ajudar com: 1 boletos, 2 reservas, 3 regimento/convenção, 4 administração.');
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        } else {
+          const q = incomingText;
+          const confirm = signedText(
+            signature,
+            `Só confirmando: você quer tirar a seguinte dúvida?\n\n"${q}"\n\nResponda 1 para SIM ou 2 para NÃO.`,
+          );
+          try {
+            await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: confirm });
+            await supabase
+              .from('clients')
+              .update({ support_state: 'docs_confirm', support_topic: supportTopic || 'regimento_convencao', support_payload: { question: q } })
+              .eq('phone', phoneDigits);
+          } catch {
+          }
+          handledByLookup = true;
+        }
+      }
+    }
+
+    if (incomingText && isBoletoIntent(incomingText)) {
       if (!clientUnitId) {
         const replyBody = `Olá, ${senderDisplayName}. Não consegui identificar sua unidade para buscar boletos. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
         const finalText = signedText(signature, replyBody);
@@ -1392,7 +1457,7 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    if (!handledByLookup && msg.kind === 'text' && incomingText && isReservaIntent(incomingText)) {
+    if (!handledByLookup && incomingText && isReservaIntent(incomingText)) {
       const reservaUrl = getReservaUrl();
       const lines: string[] = [];
       lines.push(`Olá, ${senderDisplayName}.`);
@@ -1431,10 +1496,11 @@ export default async function handler(req: any, res: any) {
       handledByLookup = true;
     }
 
-    if (!handledByLookup && msg.kind === 'text' && incomingText && isRegimentoIntent(incomingText)) {
+    if (!handledByLookup && incomingText && isRegimentoIntent(incomingText)) {
       const prompt =
         'Claro — me diga qual é a sua dúvida sobre a Convenção ou o Regimento Interno.\n\n' +
-        'Se puder, informe: qual tema (barulho, obra, pet, vaga, piscina, multa, etc.) e o que aconteceu.';
+        'Você pode digitar ou enviar um áudio.\n\n' +
+        'Se puder, informe: qual tema (barulho, obra, pet, vaga, piscina, multa, etc.) e o que aconteceu. Eu vou confirmar se entendi antes de responder.';
       const finalText = signedText(signature, prompt);
 
       try {
@@ -1458,7 +1524,12 @@ export default async function handler(req: any, res: any) {
           .eq('id', upsertedConv.id);
         await supabase
           .from('clients')
-          .update({ support_state: 'docs_wait_question', support_topic: 'regimento_convencao', support_started_at: new Date().toISOString() })
+          .update({
+            support_state: 'docs_wait_question',
+            support_topic: 'regimento_convencao',
+            support_started_at: new Date().toISOString(),
+            support_payload: {},
+          })
           .eq('phone', phoneDigits);
       } catch {
       }
@@ -1466,7 +1537,7 @@ export default async function handler(req: any, res: any) {
       handledByLookup = true;
     }
 
-    if (!handledByLookup && msg.kind === 'text' && incomingText && isAdminIntent(incomingText)) {
+    if (!handledByLookup && incomingText && isAdminIntent(incomingText)) {
       const adminPhone = getAdminForwardPhone();
       const ack = signedText(signature, 'Certo. Vou encaminhar sua mensagem para a Administração.');
 
@@ -1524,14 +1595,12 @@ export default async function handler(req: any, res: any) {
 
     const shouldSendMenu =
       shouldAutoReply() &&
-      msg.kind === 'text' &&
-      typeof text === 'string' &&
-      text.trim() &&
-      !isMenuChoice(text.trim()) &&
-      !isBoletoIntent(text.trim()) &&
-      !isReservaIntent(text.trim()) &&
-      !isRegimentoIntent(text.trim()) &&
-      !isAdminIntent(text.trim());
+      incomingText &&
+      !isMenuChoice(incomingText) &&
+      !isBoletoIntent(incomingText) &&
+      !isReservaIntent(incomingText) &&
+      !isRegimentoIntent(incomingText) &&
+      !isAdminIntent(incomingText);
 
     if (!handledByLookup && shouldSendMenu) {
       const now = Date.now();
