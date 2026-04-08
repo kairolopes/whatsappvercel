@@ -26,6 +26,12 @@ function isBoletoIntent(text: string) {
   if (!s) return false;
   if (s === '1') return true;
   if (s.includes('boleto')) return true;
+  if (s.includes('taxa condominial') || s.includes('taxa do condominio') || s.includes('taxa do condomínio')) return true;
+  if (s.includes('condominial')) return true;
+  if (s.includes('mensalidade') || s.includes('mensal')) return true;
+  if (s.includes('fatura')) return true;
+  if (s.includes('pagamento') || s.includes('pagar')) return true;
+  if (s.includes('pix')) return true;
   if (s.includes('2 via') || s.includes('segunda via')) return true;
   return false;
 }
@@ -79,6 +85,18 @@ function isCancel(text: string) {
   return s === 'cancelar' || s === 'cancela' || s === '0' || s === 'sair' || s === 'voltar';
 }
 
+function isLinkingIssue(text: string) {
+  const s = simplifyText(text);
+  if (!s) return false;
+  if (s.includes('nao esta vinculado') || s.includes('não está vinculado')) return true;
+  if (s.includes('nao esta vinculada') || s.includes('não está vinculada')) return true;
+  if (s.includes('nao sou desse apartamento') || s.includes('não sou desse apartamento')) return true;
+  if (s.includes('apartamento errado') || s.includes('bloco errado')) return true;
+  if (s.includes('corrigir cadastro') || s.includes('atualizar cadastro')) return true;
+  if (s.includes('vincular minha conta') || s.includes('vincular')) return true;
+  return false;
+}
+
 function isMenuRequest(text: string) {
   const s = simplifyText(text);
   return s === 'menu' || s === 'opcoes' || s === 'opcoes do menu' || s === 'opcao' || s === 'opções' || s === 'opções do menu';
@@ -95,4 +113,5 @@ export {
   isNegative,
   isCancel,
   isMenuRequest,
+  isLinkingIssue,
 };

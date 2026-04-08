@@ -1,6 +1,16 @@
 import { describe, expect, test } from 'vitest';
 
-import { isAdminIntent, isAffirmative, isBoletoIntent, isCancel, isMenuRequest, isNegative, isRegimentoIntent, isReservaIntent } from './intents';
+import {
+  isAdminIntent,
+  isAffirmative,
+  isBoletoIntent,
+  isCancel,
+  isLinkingIssue,
+  isMenuRequest,
+  isNegative,
+  isRegimentoIntent,
+  isReservaIntent,
+} from './intents';
 
 describe('intents', () => {
   test('boleto intent', () => {
@@ -9,6 +19,9 @@ describe('intents', () => {
     expect(isBoletoIntent('boleto')).toBe(true);
     expect(isBoletoIntent('2 via boleto')).toBe(true);
     expect(isBoletoIntent('segunda via')).toBe(true);
+    expect(isBoletoIntent('quero pagar minha taxa mensal')).toBe(true);
+    expect(isBoletoIntent('taxa condominial')).toBe(true);
+    expect(isBoletoIntent('quero pagar via pix')).toBe(true);
     expect(isBoletoIntent('reserva')).toBe(false);
   });
 
@@ -47,5 +60,11 @@ describe('intents', () => {
     expect(isMenuRequest('opções')).toBe(true);
     expect(isMenuRequest('opcoes')).toBe(true);
     expect(isMenuRequest('quero boleto')).toBe(false);
+  });
+
+  test('linking issue', () => {
+    expect(isLinkingIssue('minha conta não está vinculada a este apartamento')).toBe(true);
+    expect(isLinkingIssue('apartamento errado')).toBe(true);
+    expect(isLinkingIssue('quero boleto')).toBe(false);
   });
 });

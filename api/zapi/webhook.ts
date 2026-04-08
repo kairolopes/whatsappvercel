@@ -5,6 +5,7 @@ import {
   isAffirmative,
   isBoletoIntent,
   isCancel,
+  isLinkingIssue,
   isMenuChoice,
   isMenuRequest,
   isNegative,
@@ -1307,6 +1308,35 @@ export default async function handler(req: any, res: any) {
       handledByLookup = true;
     }
 
+    if (!handledByLookup && incomingText && isLinkingIssue(incomingText)) {
+      const ask =
+        `Entendi, ${nameForChat}. Vamos corrigir isso agora.\n\n` +
+        `Me diga sua unidade correta (um destes formatos):\n` +
+        `- Bloco e apartamento (ex: Bloco 07, Apto 0107)\n` +
+        `- Casa/Quadra/Lote/Unidade (ex: Quadra A, Lote 12)\n\n` +
+        `Assim que você me passar, eu encaminho para a Administração ajustar o vínculo.`;
+
+      const finalText = signedText(signature, ask);
+      try {
+        await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        await supabase
+          .from('clients')
+          .update({
+            matched: false,
+            status: 2,
+            unit_id: null,
+            block: null,
+            apartment: null,
+            support_state: 'onboard_wait_unit',
+            support_topic: 'onboarding',
+            support_payload: { previous_unit: { apartment: clientApartment || null, block: clientBlock || null } },
+          })
+          .eq('phone', phoneDigits);
+      } catch {
+      }
+      handledByLookup = true;
+    }
+
     if (!handledByLookup && incomingText && onboardingState === 'onboard_wait_name') {
       const quickIntent =
         isMenuChoice(incomingText) ||
@@ -1614,8 +1644,23 @@ export default async function handler(req: any, res: any) {
           }
         } else if (!handledByLookup) {
           if (clientApartment && clientBlock) {
-            const menu = buildWelcomeMenu({ name: nameForChat, apartment: clientApartment, block: clientBlock });
-            const finalText = signedText(signature, menu);
+            const convo = await generateConversationalReply({
+              signature,
+              preferredName: nameForChat,
+              hasUnit: true,
+              message: incomingText,
+            });
+
+            const fallbackVariants = [
+              `Beleza, ${nameForChat}. Como posso te ajudar?\n\n${buildOptionsMenu()}`,
+              `Certo, ${nameForChat}. O que você precisa?\n\n${buildOptionsMenu()}`,
+            ];
+
+            const body = convo
+              ? `${convo.reply}${convo.suggestMenu ? `\n\n${buildOptionsMenu()}` : ''}`
+              : pickVariant(onboardingSeed, fallbackVariants);
+
+            const finalText = signedText(signature, body);
             try {
               await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
             } catch {
