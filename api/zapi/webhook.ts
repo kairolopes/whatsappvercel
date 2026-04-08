@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { searchCondoDocs } from '../lib/condoDocs';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -637,6 +638,96 @@ async function decideWithChatGpt(input: { phone: string; message: string }) {
   }
 }
 
+async function answerWithCondoDocs(question: string) {
+  const hits = await searchCondoDocs(question, 6);
+  if (hits.length === 0) {
+    return {
+      answer:
+        'Entendi sua dúvida. Eu não encontrei essa informação com clareza na Convenção ou no Regimento usando os termos enviados. Você pode me dar mais detalhes (por exemplo: qual área/assunto e qual situação aconteceu)?',
+      sources: [] as { doc: string; page: number; excerpt: string }[],
+    };
+  }
+
+  const apiKey = getOpenAiKey();
+  if (!apiKey) {
+    const first = hits[0];
+    return {
+      answer: 'Entendi sua dúvida. No momento eu não consigo consultar a IA para responder com precisão. Posso encaminhar para a Administração.',
+      sources: first
+        ? [{ doc: first.docName, page: first.page, excerpt: first.snippet.slice(0, 240) }]
+        : ([] as { doc: string; page: number; excerpt: string }[]),
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const model = getAiModel();
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: 500,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Você responde dúvidas sobre condomínio usando SOMENTE os trechos fornecidos. Seja empático, direto e prático. Se não houver base suficiente, diga que não encontrou nos documentos e sugira falar com a Administração. Retorne JSON com: answer (string) e sources (array de {doc,page,excerpt}). Em sources, use apenas doc/page/excerpt fornecidos, no máximo 3 itens.',
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              question,
+              excerpts: hits.map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 320) })),
+            }),
+          },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    const json = await res.json().catch(() => null);
+    const content = String(json?.choices?.[0]?.message?.content ?? '');
+    const parsed = extractJsonObject(content) as any;
+    const answer = String(parsed?.answer ?? '').trim();
+    const sourcesRaw = Array.isArray(parsed?.sources) ? parsed.sources : [];
+    const sources = sourcesRaw
+      .slice(0, 3)
+      .map((s: any) => ({
+        doc: String(s?.doc ?? '').trim(),
+        page: Number(s?.page ?? 0) || 0,
+        excerpt: String(s?.excerpt ?? '').trim(),
+      }))
+      .filter((s) => s.doc && s.page > 0 && s.excerpt);
+
+    if (!answer) {
+      return {
+        answer:
+          'Entendi sua dúvida. Eu não consegui montar uma resposta com segurança usando os documentos agora. Quer que eu encaminhe para a Administração?',
+        sources: hits.slice(0, 2).map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 240) })),
+      };
+    }
+
+    return {
+      answer,
+      sources: sources.length ? sources : hits.slice(0, 2).map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 240) })),
+    };
+  } catch {
+    return {
+      answer: 'Entendi sua dúvida. Tive um problema ao consultar os documentos agora. Quer tentar de novo ou falar com a Administração?',
+      sources: hits.slice(0, 2).map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 240) })),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function getWebhookMessageData(payload: any): { kind: string; text: string | null; meta: AnyRecord } {
   const rawText = payload?.text?.message ?? payload?.text ?? payload?.message;
   if (typeof rawText === 'string' && rawText.trim()) {
@@ -978,11 +1069,13 @@ export default async function handler(req: any, res: any) {
     let clientApartment = '';
     let lastAutoReplyTo = '';
     let lastAutoReplyAt: string | null = null;
+    let supportState = '';
+    let supportTopic = '';
 
     try {
       const { data: existingClient } = await supabase
         .from('clients')
-        .select('phone,status,matched,unit_id,block,apartment,last_auto_reply_to,last_auto_reply_at')
+        .select('phone,status,matched,unit_id,block,apartment,last_auto_reply_to,last_auto_reply_at,support_state,support_topic')
         .eq('phone', phoneDigits)
         .maybeSingle();
 
@@ -1009,6 +1102,8 @@ export default async function handler(req: any, res: any) {
         clientApartment = String((existingClient as any)?.apartment ?? '').trim();
         lastAutoReplyTo = String((existingClient as any)?.last_auto_reply_to ?? '').trim();
         lastAutoReplyAt = (existingClient as any)?.last_auto_reply_at ?? null;
+        supportState = String((existingClient as any)?.support_state ?? '').trim();
+        supportTopic = String((existingClient as any)?.support_topic ?? '').trim();
         await supabase
           .from('clients')
           .update({ whatsapp_name: senderDisplayName, whatsapp_photo_url: avatarUrl })
@@ -1049,6 +1144,60 @@ export default async function handler(req: any, res: any) {
         } catch {
         }
       }
+    }
+
+    const shouldHandleDocQuestion =
+      msg.kind === 'text' &&
+      incomingText &&
+      (supportState === 'docs_wait_question' || supportState === 'docs_active') &&
+      !isMenuChoice(incomingText) &&
+      !isBoletoIntent(incomingText) &&
+      !isReservaIntent(incomingText) &&
+      !isRegimentoIntent(incomingText) &&
+      !isAdminIntent(incomingText);
+
+    if (!handledByLookup && shouldHandleDocQuestion) {
+      const result = await answerWithCondoDocs(incomingText);
+      const src = (result.sources || []).slice(0, 2);
+      const lines: string[] = [];
+      lines.push(result.answer);
+      if (src.length) {
+        lines.push('');
+        lines.push('Onde encontrei:');
+        for (const s of src) {
+          lines.push(`${s.doc}, pág. ${s.page}`);
+        }
+      }
+      lines.push('');
+      lines.push('Quer que eu procure mais detalhes, ou prefere falar com a Administração? (Responda 4)');
+
+      const finalText = signedText(signature, lines.join('\n'));
+      try {
+        const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+        await supabase.from('messages').insert([
+          {
+            conversation_id: upsertedConv.id,
+            text: finalText,
+            sender: 'user',
+            timestamp: formatTimeHM(new Date()),
+            status: 'sent',
+            external_id: externalId || null,
+            kind: 'text',
+            meta: { action: 'docs_answer', ai: true, sources: src },
+          },
+        ]);
+        await supabase
+          .from('conversations')
+          .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+          .eq('id', upsertedConv.id);
+        await supabase
+          .from('clients')
+          .update({ support_state: 'docs_active', support_topic: supportTopic || 'docs', support_started_at: new Date().toISOString() })
+          .eq('phone', phoneDigits);
+      } catch {
+      }
+      handledByLookup = true;
     }
 
     if (msg.kind === 'text' && incomingText && isBoletoIntent(incomingText)) {
@@ -1339,40 +1488,35 @@ export default async function handler(req: any, res: any) {
     }
 
     if (!handledByLookup && msg.kind === 'text' && incomingText && isRegimentoIntent(incomingText)) {
-      const regimentoUrl = getRegimentoPdfUrl();
-      const convencaoUrl = getConvencaoPdfUrl();
+      const prompt =
+        'Claro — me diga qual é a sua dúvida sobre a Convenção ou o Regimento Interno.\n\n' +
+        'Se puder, informe: qual tema (barulho, obra, pet, vaga, piscina, multa, etc.) e o que aconteceu.';
+      const finalText = signedText(signature, prompt);
 
-      const caption = signedText(signature, 'Segue a Convenção e/ou Regimento Interno do condomínio.');
-
-      let sentAny = false;
       try {
-        if (convencaoUrl) {
-          await zapiFetch('POST', '/send-document/pdf', {
-            phone: phoneDigits,
-            document: convencaoUrl,
-            fileName: 'convencao.pdf',
-            caption,
-          });
-          sentAny = true;
-        }
-        if (regimentoUrl) {
-          await zapiFetch('POST', '/send-document/pdf', {
-            phone: phoneDigits,
-            document: regimentoUrl,
-            fileName: 'regimento-interno.pdf',
-            caption,
-          });
-          sentAny = true;
-        }
+        const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+        await supabase.from('messages').insert([
+          {
+            conversation_id: upsertedConv.id,
+            text: finalText,
+            sender: 'user',
+            timestamp: formatTimeHM(new Date()),
+            status: 'sent',
+            external_id: externalId || null,
+            kind: 'text',
+            meta: { action: 'docs_prompt', ai: true },
+          },
+        ]);
+        await supabase
+          .from('conversations')
+          .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+          .eq('id', upsertedConv.id);
+        await supabase
+          .from('clients')
+          .update({ support_state: 'docs_wait_question', support_topic: 'regimento_convencao', support_started_at: new Date().toISOString() })
+          .eq('phone', phoneDigits);
       } catch {
-      }
-
-      if (!sentAny) {
-        const finalText = signedText(signature, 'No momento eu não tenho o PDF configurado.');
-        try {
-          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-        } catch {
-        }
       }
 
       handledByLookup = true;

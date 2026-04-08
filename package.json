@@ -12,11 +12,12 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.100.1",
     "@googlemaps/js-api-loader": "^1.16.10",
+    "@supabase/supabase-js": "^2.100.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.38.0",
     "lucide-react": "^0.511.0",
+    "pdf-parse": "^2.4.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.3.0",
@@ -27,6 +28,7 @@
     "@eslint/js": "^9.25.0",
     "@types/google.maps": "^3.58.1",
     "@types/node": "^22.15.30",
+    "@types/pdf-parse": "^1.1.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.4.1",
