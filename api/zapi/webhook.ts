@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { searchCondoDocs } from '../lib/condoDocs';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -638,14 +639,7 @@ async function decideWithChatGpt(input: { phone: string; message: string }) {
 }
 
 async function answerWithCondoDocs(question: string) {
-  let hits: any[] = [];
-  try {
-    const mod: any = await import('../lib/condoDocs');
-    const fn = mod?.searchCondoDocs as undefined | ((q: string, limit?: number) => Promise<any[]>);
-    hits = fn ? await fn(question, 6) : [];
-  } catch {
-    hits = [];
-  }
+  const hits = await searchCondoDocs(question, 6).catch(() => [] as any[]);
   if (hits.length === 0) {
     return {
       answer:
