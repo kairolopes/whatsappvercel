@@ -648,97 +648,23 @@ async function answerWithCondoDocs(question: string) {
     };
   }
 
-  const apiKey = getOpenAiKey();
-  if (!apiKey) {
-    const first = hits[0];
-    return {
-      answer: 'Entendi sua dúvida. No momento eu não consigo consultar a IA para responder com precisão. Posso encaminhar para a Administração.',
-      sources: first
-        ? [{ doc: first.docName, page: first.page, excerpt: first.snippet.slice(0, 240) }]
-        : ([] as { doc: string; page: number; excerpt: string }[]),
-    };
-  }
+  const first = hits[0];
+  const excerpt = String(first?.snippet ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 320);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
-  try {
-    const model = getAiModel();
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
+  return {
+    answer:
+      `Entendi sua dúvida. Pelo que consta nos documentos, encontrei o seguinte trecho relacionado ao seu tema. Se você me disser sua situação (dia/horário/local), eu te ajudo a aplicar na prática.`,
+    sources: [
+      {
+        doc: String(first?.docName ?? '').trim(),
+        page: Number(first?.page ?? 0) || 0,
+        excerpt,
       },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        max_tokens: 500,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content:
-              'Você responde dúvidas sobre condomínio usando SOMENTE os trechos fornecidos. Seja empático, direto e prático. Se os trechos forem parciais, responda com o que eles cobrem e deixe claro a limitação (sem inventar). Retorne JSON com: answer (string) e sources (array de {doc,page,excerpt}). Em sources, use apenas doc/page/excerpt fornecidos, no máximo 3 itens.',
-          },
-          {
-            role: 'user',
-            content: JSON.stringify({
-              question,
-              excerpts: hits.map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 320) })),
-            }),
-          },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    const json = await res.json().catch(() => null);
-    const content = String(json?.choices?.[0]?.message?.content ?? '');
-    const parsed = extractJsonObject(content) as any;
-    const answer = String(parsed?.answer ?? '').trim();
-    const sourcesRaw = Array.isArray(parsed?.sources) ? parsed.sources : [];
-    const sources = sourcesRaw
-      .slice(0, 3)
-      .map((s: any) => ({
-        doc: String(s?.doc ?? '').trim(),
-        page: Number(s?.page ?? 0) || 0,
-        excerpt: String(s?.excerpt ?? '').trim(),
-      }))
-      .filter((s) => s.doc && s.page > 0 && s.excerpt);
-
-    const refusalSignals = ['não consegui', 'nao consegui', 'não encontrei', 'nao encontrei', 'sem clareza'];
-    const isRefusal = refusalSignals.some((s) => answer.toLowerCase().includes(s));
-
-    if (!answer) {
-      return {
-        answer:
-          'Entendi sua dúvida. Eu não consegui montar uma resposta com segurança usando os documentos agora. Quer que eu encaminhe para a Administração?',
-        sources: hits.slice(0, 2).map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 240) })),
-      };
-    }
-
-    if (isRefusal && hits.length) {
-      const first = hits[0];
-      const excerpt = String(first?.snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 260);
-      return {
-        answer:
-          `Encontrei a referência abaixo nos documentos. Se você me disser sua situação (dia/horário/local), eu te explico como aplicar na prática.\n\n${first.docName}, pág. ${first.page}: ${excerpt}`,
-        sources: [{ doc: first.docName, page: first.page, excerpt: excerpt }],
-      };
-    }
-
-    return {
-      answer,
-      sources: sources.length ? sources : hits.slice(0, 2).map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 240) })),
-    };
-  } catch {
-    return {
-      answer: 'Entendi sua dúvida. Tive um problema ao consultar os documentos agora. Quer tentar de novo ou falar com a Administração?',
-      sources: hits.slice(0, 2).map((h) => ({ doc: h.docName, page: h.page, excerpt: h.snippet.slice(0, 240) })),
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
+    ].filter((s) => s.doc && s.page > 0 && s.excerpt),
+  };
 }
 
 function getWebhookMessageData(payload: any): { kind: string; text: string | null; meta: AnyRecord } {
