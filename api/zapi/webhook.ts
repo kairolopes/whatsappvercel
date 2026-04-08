@@ -565,7 +565,8 @@ export default async function handler(req: any, res: any) {
   const timeString = `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
   const msg = getWebhookMessageData(payload as any);
   const text = msg.text;
-  const contactName = (payload as any)?.chatName || (payload as any)?.senderName || (payload as any)?.contact?.displayName || phone;
+  const conversationName = (payload as any)?.chatName || (payload as any)?.contact?.displayName || (payload as any)?.senderName || phone;
+  const senderDisplayName = (payload as any)?.senderName || (payload as any)?.chatName || (payload as any)?.contact?.displayName || phone;
   const avatarUrl = (payload as any)?.senderPhoto || (payload as any)?.photo || null;
 
   const { data: existingConv } = await supabase
@@ -603,7 +604,7 @@ export default async function handler(req: any, res: any) {
     .upsert(
       {
         phone,
-        contact_name: contactName,
+        contact_name: conversationName,
         avatar_url: avatarUrl,
         last_message: lastMessage,
         last_message_time: lastMessageTime,
@@ -715,7 +716,7 @@ export default async function handler(req: any, res: any) {
           {
             phone: phoneDigits,
             status: 2,
-            whatsapp_name: contactName,
+            whatsapp_name: senderDisplayName,
             whatsapp_photo_url: avatarUrl,
             matched: false,
             match_payload: {},
@@ -733,7 +734,7 @@ export default async function handler(req: any, res: any) {
         lastAutoReplyAt = (existingClient as any)?.last_auto_reply_at ?? null;
         await supabase
           .from('clients')
-          .update({ whatsapp_name: contactName, whatsapp_photo_url: avatarUrl })
+          .update({ whatsapp_name: senderDisplayName, whatsapp_photo_url: avatarUrl })
           .eq('phone', phoneDigits);
       }
     } catch {
@@ -790,9 +791,9 @@ export default async function handler(req: any, res: any) {
         let replyBody = '';
 
         if (!clientApartment || !clientBlock) {
-          replyBody = `Olá, ${contactName}. Não consegui identificar seu apartamento e bloco automaticamente. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
+          replyBody = `Olá, ${senderDisplayName}. Não consegui identificar seu apartamento e bloco automaticamente. Me informe seu bloco e apartamento para eu vincular seu acesso.`;
         } else {
-          replyBody = buildWelcomeMenu({ name: contactName, apartment: clientApartment, block: clientBlock });
+          replyBody = buildWelcomeMenu({ name: senderDisplayName, apartment: clientApartment, block: clientBlock });
         }
 
         const finalText = signedText(signature, replyBody);
