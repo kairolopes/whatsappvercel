@@ -181,10 +181,29 @@ function looksLikeCondoQuestion(input: string) {
   ];
   if (strongKeywords.some((k) => s.includes(k))) return true;
 
-  const tokens = s.split(' ').filter((t) => t.length >= 3);
-  if (tokens.length < 2) return false;
-  if (s.includes('pode')) return true;
+  return false;
+}
 
+function isOffTopicChitChat(input: string) {
+  const s = simplifyText(String(input || ''));
+  if (!s) return false;
+  const off = [
+    'cinema',
+    'filme',
+    'filmes',
+    'serie',
+    'série',
+    'musica',
+    'música',
+    'jogo',
+    'futebol',
+    'novela',
+    'politica',
+    'política',
+    'religiao',
+    'religião',
+  ];
+  if (off.some((w) => s.includes(w))) return true;
   return false;
 }
 
@@ -1598,6 +1617,10 @@ export default async function handler(req: any, res: any) {
       aiIntent = ai.intent;
     }
 
+    if (incomingText && aiIntent === 'docs' && isOffTopicChitChat(incomingText)) {
+      aiIntent = 'other';
+    }
+
     const isOtherIntentWithAi =
       isOtherIntent || aiIntent === 'boleto' || aiIntent === 'reserva' || aiIntent === 'admin' || aiIntent === 'docs';
 
@@ -1607,10 +1630,12 @@ export default async function handler(req: any, res: any) {
       const tooSoon = Number.isFinite(lastAtMs) ? now - lastAtMs < 5000 : false;
       const sameMessage = Boolean(messageId) && Boolean(lastAutoReplyTo) && lastAutoReplyTo === String(messageId);
       if (!tooSoon && !sameMessage) {
-      if (aiIntent === 'docs' || looksLikeCondoQuestion(incomingText)) {
+      if ((aiIntent === 'docs' || looksLikeCondoQuestion(incomingText)) && !isOffTopicChitChat(incomingText)) {
         const q = incomingText;
         const ai = await classifyRoutingIntent(q);
-        const clearlyDocs = (ai.intent === 'docs' && ai.confidence >= 0.6) || (q.includes('?') && q.length >= 10) || looksLikeCondoQuestion(q);
+        const clearlyDocs =
+          !isOffTopicChitChat(q) &&
+          ((ai.intent === 'docs' && ai.confidence >= 0.6) || (q.includes('?') && q.length >= 10) || looksLikeCondoQuestion(q));
 
         if (!clearlyDocs) {
           const finalText = signedText(
