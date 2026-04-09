@@ -1,35 +1,55 @@
 import { useEffect } from 'react';
-import { Sidebar } from './components/sidebar/Sidebar';
-import { ChatArea } from './components/chat/ChatArea';
-import { useChatStore } from '@/store/chatStore';
-import { zapi } from '@/lib/zapi';
+import { Navigate, Route, Routes } from 'react-router-dom';
+import { useAuthStore } from '@/store/authStore';
+import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
+import Login from '@/pages/Login';
+import Whatsapp from '@/pages/Whatsapp';
+import Admin from '@/pages/Admin';
 
 function App() {
-  const { fetchConversations, startPolling, stopPolling, startRealtime, stopRealtime } = useChatStore();
+  const { init, initialized } = useAuthStore();
 
   useEffect(() => {
-    fetchConversations();
-    startPolling();
-    startRealtime();
+    init();
+  }, [init]);
 
-    zapi.setReadReceipts('enable').catch(() => {
-    });
-
-    return () => {
-      stopPolling();
-      stopRealtime();
-    };
-  }, [fetchConversations, startPolling, stopPolling, startRealtime, stopRealtime]);
+  if (!initialized) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center">
+        <div className="w-full max-w-md px-6">
+          <div className="rounded-2xl bg-zinc-900/70 border border-zinc-800 p-6">
+            <div className="h-4 w-32 bg-zinc-800 rounded animate-pulse" />
+            <div className="mt-4 h-10 w-full bg-zinc-800 rounded animate-pulse" />
+            <div className="mt-3 h-10 w-full bg-zinc-800 rounded animate-pulse" />
+            <div className="mt-6 h-10 w-32 bg-zinc-800 rounded animate-pulse" />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="w-screen h-screen bg-wa-bg flex items-center justify-center relative overflow-hidden">
-      <div className="absolute top-0 left-0 w-full h-[127px] bg-wa-primary z-0" />
-
-      <div className="w-full max-w-[1600px] h-[calc(100vh-38px)] min-h-[500px] mt-5 mb-5 mx-auto bg-white rounded shadow-md z-10 flex overflow-hidden xl:w-[calc(100vw-38px)]">
-        <Sidebar />
-        <ChatArea />
-      </div>
-    </div>
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route
+        path="/app"
+        element={
+          <ProtectedRoute>
+            <Whatsapp />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <ProtectedRoute requireAdmin>
+            <Admin />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="/" element={<Navigate to="/login" replace />} />
+      <Route path="*" element={<Navigate to="/login" replace />} />
+    </Routes>
   );
 }
 

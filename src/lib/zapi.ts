@@ -1,42 +1,40 @@
 import { ZapiClient, createZapiApi, type ZapiClientConfig, type ZapiSendResponse } from './zapi/index';
+import { supabase } from '@/lib/supabase';
+import { useAuthStore } from '@/store/authStore';
 
 export const ZAPI_INSTANCE = import.meta.env.VITE_ZAPI_INSTANCE;
 export const ZAPI_TOKEN = import.meta.env.VITE_ZAPI_TOKEN;
 export const ZAPI_CLIENT_TOKEN = import.meta.env.VITE_ZAPI_CLIENT_TOKEN;
 
-const ALLOW_DIRECT = import.meta.env.VITE_ALLOW_DIRECT_ZAPI === 'true';
-
-const DEFAULT_ADMIN_TOKEN = 'rokzap_2026_03_29_a8d2b7c1f4e9';
-let authAttempt: Promise<void> | null = null;
+const ALLOW_DIRECT = false;
 
 function getFrontendConfig(): ZapiClientConfig | null {
-  const isLocalhost = typeof window !== 'undefined' && window.location.hostname === 'localhost';
   if (!ALLOW_DIRECT) return null;
   if (!ZAPI_INSTANCE || !ZAPI_TOKEN || !ZAPI_CLIENT_TOKEN) return null;
   return { instanceId: ZAPI_INSTANCE, token: ZAPI_TOKEN, clientToken: ZAPI_CLIENT_TOKEN };
 }
 
-async function ensureProxyAuth() {
-  if (authAttempt) return authAttempt;
-  authAttempt = (async () => {
-    const res = await fetch('/api/zapi/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ token: DEFAULT_ADMIN_TOKEN }),
-    });
-    const json = await res.json().catch(() => null);
-    if (!res.ok || !json?.ok) {
-      throw new Error(json?.reason || 'Falha no login do proxy');
-    }
-  })().finally(() => {
-    authAttempt = null;
-  });
-  return authAttempt;
+async function buildAuthHeaders() {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  const condominioId = useAuthStore.getState().activeCondominioId;
+  if (!token) throw new Error('Sessão expirada. Faça login novamente.');
+  if (!condominioId) throw new Error('Selecione um condomínio para continuar.');
+  return {
+    authorization: `Bearer ${token}`,
+    'x-condominio-id': condominioId,
+  } as Record<string, string>;
 }
 
 async function apiFetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const res = await fetch(input, { ...init, credentials: 'include' });
+  const authHeaders = await buildAuthHeaders();
+  const res = await fetch(input, {
+    ...init,
+    headers: {
+      ...(init?.headers ? (init.headers as any) : {}),
+      ...authHeaders,
+    },
+  });
   const json = await res.json().catch(() => null);
 
   const formatDetails = (details: unknown) => {
@@ -54,18 +52,6 @@ async function apiFetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Pr
     }
     return String(details);
   };
-
-  if (res.status === 401) {
-    await ensureProxyAuth();
-    const retry = await fetch(input, { ...init, credentials: 'include' });
-    const retryJson = await retry.json().catch(() => null);
-    if (!retry.ok || !retryJson?.ok) {
-      const base = retryJson?.message || retryJson?.reason || 'Erro Z-API';
-      const details = formatDetails(retryJson?.details);
-      throw new Error(details ? `${base}: ${details}` : base);
-    }
-    return retryJson.data as T;
-  }
 
   if (!res.ok || !json?.ok) {
     const base = json?.message || json?.reason || 'Erro Z-API';
@@ -131,8 +117,6 @@ export const zapi = {
     directApi
       ? directApi.messages.removeReaction(phone, messageId)
       : apiPost('/api/zapi/send-remove-reaction', { phone, messageId }),
-  login: (token: string) => apiPost('/api/zapi/login', { token }),
-  logout: () => apiPost('/api/zapi/logout', {}),
   request: (method: string, path: string, data?: unknown) => apiPost('/api/zapi/request', { method, path, data }),
 
   forwardMessage: (phone: string, messageId: string) => apiPost('/api/zapi/forward-message', { phone, messageId }),
