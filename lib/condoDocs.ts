@@ -37,7 +37,7 @@ function simplify(input: string) {
 
 function prepareForEmbedding(text: string) {
   const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
-  return cleaned.length > 2000 ? cleaned.slice(0, 2000) : cleaned;
+  return cleaned.length > 5000 ? cleaned.slice(0, 5000) : cleaned;
 }
 
 function dot(a: number[], b: number[]) {

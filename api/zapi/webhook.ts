@@ -1060,7 +1060,7 @@ async function answerWithCondoDocs(question: string) {
       doc: String(h?.docName ?? '').trim(),
       page: Number(h?.page ?? 0) || 0,
       excerpt: String(h?.snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 420),
-      context: String(h?.context ?? '').replace(/\s+/g, ' ').trim().slice(0, 1800),
+      context: String(h?.context ?? '').replace(/\s+/g, ' ').trim().slice(0, 4200),
     }))
     .filter((s) => s.doc && s.page > 0 && s.context);
 
