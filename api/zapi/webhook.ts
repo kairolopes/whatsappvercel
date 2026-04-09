@@ -259,6 +259,9 @@ function looksLikeCondoQuestion(input: string) {
     'salao',
     'portaria',
     'visitante',
+    'assembleia',
+    'assembleias',
+    'assembleia geral',
     'horario',
     'permitido',
     'proibido',
@@ -2721,7 +2724,7 @@ export default async function handler(req: any, res: any) {
       const looksLikeFullQuestion = incomingText.includes('?') || incomingText.length >= 18 || looksLikeCondoQuestion(incomingText);
       const isEntryOnly = simplified === '4' || simplified === 'regimento' || simplified === 'convencao' || simplified === 'condominio' || simplified === 'duvida';
 
-      if (aiIntent === 'docs' && looksLikeFullQuestion && !isEntryOnly) {
+      if (looksLikeFullQuestion && !isEntryOnly) {
         const result = await answerWithCondoDocs(incomingText);
         const src = (result.sources || []).slice(0, 2);
         const lines: string[] = [];
