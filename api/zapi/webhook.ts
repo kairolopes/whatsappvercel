@@ -207,6 +207,9 @@ function isOffTopicChitChat(input: string) {
     'viagem',
     'viajar',
     'viagens',
+    'aviao',
+    'avião',
+    'corrida',
   ];
   if (off.some((w) => s.includes(w))) return true;
   return false;
@@ -224,9 +227,11 @@ function isChattyRequest(input: string) {
     'bater papo',
     'bater um papo',
     'trocar ideia',
+    'conversar fiado',
   ];
   if (patterns.some((p) => s.includes(p))) return true;
   if (s.includes('comigo') && (s.includes('fala') || s.includes('conversa'))) return true;
+  if (s.includes('conversar') && s.includes('fiado')) return true;
   return false;
 }
 
@@ -2061,6 +2066,35 @@ export default async function handler(req: any, res: any) {
           const isSwitchToOtherFlow =
             (ai.intent === 'boleto' || ai.intent === 'reserva' || ai.intent === 'admin') && ai.confidence >= 0.55;
           const isNotDocs = (ai.intent === 'greeting' || ai.intent === 'other') && ai.confidence >= 0.55;
+
+          if (!handledByLookup && (isOffTopicChitChat(q) || isChattyRequest(q) || isEmotionalMessage(q))) {
+            const convo = await generateConversationalReply({
+              signature,
+              preferredName: resolvedPreferred,
+              hasUnit: Boolean(clientApartment && clientBlock),
+              message: q,
+            });
+
+            let body = '';
+            if (isEmotionalMessage(q)) {
+              body =
+                `Poxa${greetSuffix(nameForChat)}… sinto muito que você esteja se sentindo assim. ` +
+                `Se você quiser, me diz o que aconteceu — eu te escuto.\n\n` +
+                `Se preferir, posso te ajudar com alguma opção do condomínio:\n\n${buildOptionsMenu()}`;
+            } else {
+              body = convo
+                ? `${convo.reply}\n\n${buildOptionsMenu()}`
+                : `Entendi${greetSuffix(nameForChat)}. Eu consigo ajudar com assuntos do condomínio.\n\n${buildOptionsMenu()}`;
+            }
+
+            const finalText = signedText(signature, body);
+            try {
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+              await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+            } catch {
+            }
+            handledByLookup = true;
+          }
 
           if (
             isMenuRequest(q) ||
