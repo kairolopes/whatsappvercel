@@ -202,9 +202,39 @@ function isOffTopicChitChat(input: string) {
     'política',
     'religiao',
     'religião',
+    'passeio',
+    'passeios',
+    'viagem',
+    'viajar',
+    'viagens',
   ];
   if (off.some((w) => s.includes(w))) return true;
   return false;
+}
+
+function isChattyRequest(input: string) {
+  const s = simplifyText(String(input || ''));
+  if (!s) return false;
+  const patterns = [
+    'fala de',
+    'fale de',
+    'me fala de',
+    'me fale de',
+    'conversa comigo',
+    'bater papo',
+    'bater um papo',
+    'trocar ideia',
+  ];
+  if (patterns.some((p) => s.includes(p))) return true;
+  if (s.includes('comigo') && (s.includes('fala') || s.includes('conversa'))) return true;
+  return false;
+}
+
+function isEmotionalMessage(input: string) {
+  const s = simplifyText(String(input || ''));
+  if (!s) return false;
+  const cues = ['triste', 'chateado', 'chateada', 'pra baixo', 'cansado', 'cansada', 'ansioso', 'ansiosa'];
+  return cues.some((c) => s.includes(c));
 }
 
 function isIdentityQuestion(input: string) {
@@ -1621,6 +1651,10 @@ export default async function handler(req: any, res: any) {
       aiIntent = 'other';
     }
 
+    if (incomingText && aiIntent === 'docs' && isChattyRequest(incomingText)) {
+      aiIntent = 'other';
+    }
+
     const isOtherIntentWithAi =
       isOtherIntent || aiIntent === 'boleto' || aiIntent === 'reserva' || aiIntent === 'admin' || aiIntent === 'docs';
 
@@ -1630,11 +1664,16 @@ export default async function handler(req: any, res: any) {
       const tooSoon = Number.isFinite(lastAtMs) ? now - lastAtMs < 5000 : false;
       const sameMessage = Boolean(messageId) && Boolean(lastAutoReplyTo) && lastAutoReplyTo === String(messageId);
       if (!tooSoon && !sameMessage) {
-      if ((aiIntent === 'docs' || looksLikeCondoQuestion(incomingText)) && !isOffTopicChitChat(incomingText)) {
+      if (
+        (aiIntent === 'docs' || looksLikeCondoQuestion(incomingText)) &&
+        !isOffTopicChitChat(incomingText) &&
+        !isChattyRequest(incomingText)
+      ) {
         const q = incomingText;
         const ai = await classifyRoutingIntent(q);
         const clearlyDocs =
           !isOffTopicChitChat(q) &&
+          !isChattyRequest(q) &&
           ((ai.intent === 'docs' && ai.confidence >= 0.6) || (q.includes('?') && q.length >= 10) || looksLikeCondoQuestion(q));
 
         if (!clearlyDocs) {
@@ -1687,6 +1726,34 @@ export default async function handler(req: any, res: any) {
           hasUnit: Boolean(clientApartment && clientBlock),
           message: incomingText,
         });
+
+        if (!convo) {
+          if (isEmotionalMessage(incomingText)) {
+            const empathetic =
+              `Poxa${greetSuffix(nameForChat)}… sinto muito que você esteja se sentindo assim. ` +
+              `Se você quiser, me diz o que aconteceu — eu te escuto.\n\n` +
+              `Se preferir, posso te ajudar com alguma opção do condomínio:\n\n${buildOptionsMenu()}`;
+            const finalText = signedText(signature, empathetic);
+            try {
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            } catch {
+            }
+            handledByLookup = true;
+          }
+
+          if (!handledByLookup && isChattyRequest(incomingText)) {
+            const msg =
+              `Posso conversar${greetSuffix(nameForChat)}, sim — mas meu foco aqui é te ajudar com assuntos do condomínio.\n\n` +
+              `Se a sua pergunta for sobre regras/uso de alguma área (ex.: piscina), me diga o que você quer saber (horários, regras, convidados, etc.).\n\n` +
+              `Ou escolha uma opção:\n\n${buildOptionsMenu()}`;
+            const finalText = signedText(signature, msg);
+            try {
+              await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+            } catch {
+            }
+            handledByLookup = true;
+          }
+        }
 
         if (convo) {
           const parts: string[] = [];
