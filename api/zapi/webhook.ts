@@ -365,8 +365,15 @@ function buildOptionsMenu() {
 }
 
 function getAiSignatureName(): string {
-  const s = String(process.env.MAKE_SIGNATURE_NAME || 'Assistente do Condomínio').trim();
-  return s || 'Assistente do Condomínio';
+  const raw = String(process.env.MAKE_SIGNATURE_NAME || '').trim();
+  const fallback = 'Assistente do Condomínio';
+  const normalized = simplifyText(raw);
+  const banned = ['sindico', 'síndico', 'administracao', 'administração', 'porteiro', 'zelador', 'morador', 'atendimento', 'suporte', 'bot'];
+  if (!raw) return fallback;
+  if (!normalized) return fallback;
+  if (banned.some((w) => normalized.includes(simplifyText(w)))) return fallback;
+  if (normalized.endsWith(' x')) return fallback;
+  return raw;
 }
 
 function shouldAutoReply(): boolean {
