@@ -954,9 +954,31 @@ async function answerWithCondoDocs(question: string) {
     }))
     .filter((s) => s.doc && s.page > 0 && s.context);
 
+  const qSimplified = simplifyText(question);
+  const must = (() => {
+    const m: string[] = [];
+    const add = (t: string) => {
+      const tt = simplifyText(t);
+      if (tt && !m.includes(tt)) m.push(tt);
+    };
+    if (qSimplified.includes('piscina')) add('piscina');
+    if (qSimplified.includes('visitante') || qSimplified.includes('convidad')) add('visitante');
+    if (qSimplified.includes('obra') || qSimplified.includes('reforma')) {
+      add('obra');
+      add('reforma');
+    }
+    if (qSimplified.includes('barulho') || qSimplified.includes('som')) add('barulho');
+    if (qSimplified.includes('pet') || qSimplified.includes('cachorro') || qSimplified.includes('gato')) add('pet');
+    return m;
+  })();
+
+  const relevantSources = must.length
+    ? sources.filter((s) => must.some((t) => simplifyText(s.context).includes(t)))
+    : sources;
+
   const apiKey = getOpenAiKey();
   if (!apiKey) {
-    const first = sources[0];
+    const first = relevantSources[0];
     return {
       answer:
         'Encontrei estes trechos nos documentos. Se você me disser sua situação (dia/horário/local), eu te ajudo a aplicar na prática.',
@@ -987,7 +1009,7 @@ async function answerWithCondoDocs(question: string) {
           },
           {
             role: 'user',
-            content: JSON.stringify({ question, sources: sources.map((s, i) => ({ i, doc: s.doc, page: s.page, text: s.context })) }),
+            content: JSON.stringify({ question, sources: relevantSources.map((s, i) => ({ i, doc: s.doc, page: s.page, text: s.context })) }),
           },
         ],
       }),
@@ -999,9 +1021,9 @@ async function answerWithCondoDocs(question: string) {
     const parsed = extractJsonObject(content) as any;
     const answer = String(parsed?.answer ?? '').trim();
     const used = Array.isArray(parsed?.used) ? parsed.used.map((x: any) => Number(x)).filter((n: any) => Number.isFinite(n)) : [];
-    const picked = used.length ? used.slice(0, 2) : [0];
+    const picked = used.length ? used.slice(0, 2) : [];
     const finalSources = picked
-      .map((idx) => sources[idx])
+      .map((idx) => relevantSources[idx])
       .filter(Boolean)
       .map((s) => ({ doc: s.doc, page: s.page, excerpt: s.excerpt }));
 
@@ -1010,13 +1032,21 @@ async function answerWithCondoDocs(question: string) {
       return {
         answer:
           'Eu não encontrei essa informação com clareza na Convenção ou no Regimento usando os termos enviados. Você pode me dizer qual área/assunto e qual situação aconteceu?',
-        sources: first ? [first] : [],
+        sources: [],
+      };
+    }
+
+    const answerSimplified = simplifyText(answer);
+    if (answerSimplified.includes('nao encontrei') || answerSimplified.includes('não encontrei') || answerSimplified.includes('sem clareza')) {
+      return {
+        answer,
+        sources: [],
       };
     }
 
     return { answer, sources: finalSources };
   } catch {
-    const first = sources[0];
+    const first = relevantSources[0];
     return {
       answer:
         'Eu não consegui consultar a resposta com clareza agora. Você pode me dizer qual área/assunto e qual situação aconteceu?',

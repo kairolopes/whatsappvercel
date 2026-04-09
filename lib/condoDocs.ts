@@ -214,10 +214,6 @@ function tokenizeQuery(q: string) {
     'posso',
     'permitido',
     'proibido',
-    'horario',
-    'horarios',
-    'horário',
-    'horários',
     'regra',
     'regras',
   ]);
@@ -225,6 +221,32 @@ function tokenizeQuery(q: string) {
     .split(' ')
     .filter((t) => t.length >= 3 && !stop.has(t));
   return Array.from(new Set(tokens)).slice(0, 16);
+}
+
+function mustTermsFromQuestion(question: string) {
+  const s = simplify(question);
+  const terms: string[] = [];
+  const add = (t: string) => {
+    const tt = simplify(t);
+    if (tt && !terms.includes(tt)) terms.push(tt);
+  };
+
+  if (s.includes('piscina')) add('piscina');
+  if (s.includes('visitante') || s.includes('convidad')) add('visitante');
+  if (s.includes('obra') || s.includes('reforma')) {
+    add('obra');
+    add('reforma');
+  }
+  if (s.includes('barulho') || s.includes('som') || s.includes('silencio')) add('barulho');
+  if (s.includes('pet') || s.includes('cachorro') || s.includes('gato')) add('pet');
+  if (s.includes('vaga') || s.includes('garagem')) add('vaga');
+  if (s.includes('multa')) add('multa');
+  if (s.includes('portaria')) add('portaria');
+  if (s.includes('churrasqueira')) add('churrasqueira');
+  if (s.includes('salao') || s.includes('salão')) add('salao');
+  if (s.includes('assembleia') || s.includes('assembleia')) add('assembleia');
+
+  return terms;
 }
 
 function scoreText(text: string, tokens: string[]) {
@@ -265,6 +287,7 @@ export async function searchCondoDocs(question: string, limit = 6) {
   const pages = await loadCondoDocsPages();
   const tokens = tokenizeQuery(question);
   if (!tokens.length) return [];
+  const must = mustTermsFromQuestion(question);
 
   const emb = await loadEmbeddings(pages);
   if (emb) {
@@ -276,12 +299,25 @@ export async function searchCondoDocs(question: string, limit = 6) {
           const sim = cosineSim(qVec, emb.vectors[idx]);
           const lex = scoreText(p.text, tokens);
           const score = sim * 0.85 + Math.min(1, lex / 20) * 0.15;
-          return { page: p, score, sim, lex };
+          return { page: p, score, sim, lex, simplified: simplify(p.text) };
         })
+        .filter((x) => (must.length ? must.some((t) => x.simplified.includes(t)) : true))
         .sort((a, b) => b.score - a.score)
         .slice(0, Math.max(1, limit));
 
-      return scored.map((s) => ({
+      const finalScored = scored.length
+        ? scored
+        : emb.pages
+            .map((p, idx) => {
+              const sim = cosineSim(qVec, emb.vectors[idx]);
+              const lex = scoreText(p.text, tokens);
+              const score = sim * 0.85 + Math.min(1, lex / 20) * 0.15;
+              return { page: p, score, sim, lex };
+            })
+            .sort((a, b) => b.score - a.score)
+            .slice(0, Math.max(1, limit));
+
+      return finalScored.map((s: any) => ({
         docName: s.page.docName,
         fileName: s.page.fileName,
         page: s.page.page,
