@@ -68,3 +68,4 @@ describe('intents', () => {
     expect(isLinkingIssue('quero boleto')).toBe(false);
   });
 });
+

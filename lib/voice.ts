@@ -54,3 +54,4 @@ export async function transcribeAudioFromUrl(params: {
   const result: TranscriptionResult = { text, model: 'whisper-1' };
   return result;
 }
+

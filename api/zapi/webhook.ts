@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
-import { searchCondoDocs } from '../lib/condoDocs.js';
-import { firstName, isValidPersonName } from '../lib/name.js';
+import { searchCondoDocs } from '../../lib/condoDocs.js';
+import { firstName, isValidPersonName } from '../../lib/name.js';
 import {
   isAdminIntent,
   isAffirmative,
@@ -13,8 +13,8 @@ import {
   isRegimentoIntent,
   isReservaIntent,
   simplifyText,
-} from '../lib/intents.js';
-import { transcribeAudioFromUrl } from '../lib/voice.js';
+} from '../../lib/intents.js';
+import { transcribeAudioFromUrl } from '../../lib/voice.js';
 
 type AnyRecord = Record<string, unknown>;
 

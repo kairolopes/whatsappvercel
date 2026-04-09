@@ -64,7 +64,7 @@ async function parsePdfPages(rootDir, docName, fileName) {
 
 async function main() {
   const rootDir = process.cwd();
-  const outPath = path.join(rootDir, 'api', 'lib', 'condoDocs.index.json');
+  const outPath = path.join(rootDir, 'lib', 'condoDocs.index.json');
 
   const docs = pickDocsFromRoot(rootDir);
   if (!docs.length) {
@@ -88,4 +88,3 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
-
