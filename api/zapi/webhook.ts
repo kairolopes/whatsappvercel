@@ -2717,46 +2717,80 @@ export default async function handler(req: any, res: any) {
     }
 
     if (!handledByLookup && incomingText && (isRegimentoIntent(incomingText) || aiIntent === 'docs')) {
-      const prompt =
-        'Claro — me diga qual é a sua dúvida sobre a Convenção ou o Regimento Interno.\n\n' +
-        'Você pode digitar ou enviar um áudio.\n\n' +
-        'Se puder, informe: qual tema (barulho, obra, pet, vaga, piscina, multa, etc.) e o que aconteceu.\n\n' +
-        'Se não for dúvida sobre regras do condomínio, você pode escolher uma opção: \n\n' +
-        buildOptionsMenu();
-      const finalText = signedText(signature, prompt);
+      const simplified = simplifyText(incomingText);
+      const looksLikeFullQuestion = incomingText.includes('?') || incomingText.length >= 18 || looksLikeCondoQuestion(incomingText);
+      const isEntryOnly = simplified === '4' || simplified === 'regimento' || simplified === 'convencao' || simplified === 'condominio' || simplified === 'duvida';
 
-      try {
-        const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-        const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
-        await supabase.from('messages').insert([
-          {
-            conversation_id: upsertedConv.id,
-            text: finalText,
-            sender: 'user',
-            timestamp: formatTimeHM(new Date()),
-            status: 'sent',
-            external_id: externalId || null,
-            kind: 'text',
-            meta: { action: 'docs_prompt', ai: true },
-          },
-        ]);
-        await supabase
-          .from('conversations')
-          .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-          .eq('id', upsertedConv.id);
-        await supabase
-          .from('clients')
-          .update({
-            support_state: 'docs_wait_question',
-            support_topic: 'regimento_convencao',
-            support_started_at: new Date().toISOString(),
-            support_payload: {},
-          })
-          .eq('phone', phoneDigits);
-      } catch {
+      if (aiIntent === 'docs' && looksLikeFullQuestion && !isEntryOnly) {
+        const result = await answerWithCondoDocs(incomingText);
+        const src = (result.sources || []).slice(0, 2);
+        const lines: string[] = [];
+        lines.push(result.answer);
+        if (src.length) {
+          lines.push('');
+          lines.push('Onde encontrei:');
+          for (const s of src) lines.push(formatDocSource(s.doc, s.page));
+          const excerpt = String(src[0]?.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
+          if (excerpt) {
+            lines.push('');
+            lines.push(`Trecho: "${excerpt}"`);
+          }
+        }
+        lines.push('');
+        lines.push('Se quiser, posso procurar mais detalhes. Ou você prefere falar com a Administração? (Responda 3)');
+
+        const finalText = signedText(signature, lines.join('\n'));
+        try {
+          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          await supabase
+            .from('clients')
+            .update({ support_state: 'docs_active', support_topic: 'regimento_convencao', support_started_at: new Date().toISOString(), support_payload: {} })
+            .eq('phone', phoneDigits);
+        } catch {
+        }
+        handledByLookup = true;
+      } else {
+        const prompt =
+          'Claro — me diga qual é a sua dúvida sobre a Convenção ou o Regimento Interno.\n\n' +
+          'Você pode digitar ou enviar um áudio.\n\n' +
+          'Se puder, informe: qual tema (barulho, obra, pet, vaga, piscina, multa, etc.) e o que aconteceu.\n\n' +
+          'Se não for dúvida sobre regras do condomínio, você pode escolher uma opção: \n\n' +
+          buildOptionsMenu();
+        const finalText = signedText(signature, prompt);
+
+        try {
+          const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+          await supabase.from('messages').insert([
+            {
+              conversation_id: upsertedConv.id,
+              text: finalText,
+              sender: 'user',
+              timestamp: formatTimeHM(new Date()),
+              status: 'sent',
+              external_id: externalId || null,
+              kind: 'text',
+              meta: { action: 'docs_prompt', ai: true },
+            },
+          ]);
+          await supabase
+            .from('conversations')
+            .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+            .eq('id', upsertedConv.id);
+          await supabase
+            .from('clients')
+            .update({
+              support_state: 'docs_wait_question',
+              support_topic: 'regimento_convencao',
+              support_started_at: new Date().toISOString(),
+              support_payload: {},
+            })
+            .eq('phone', phoneDigits);
+        } catch {
+        }
+
+        handledByLookup = true;
       }
-
-      handledByLookup = true;
     }
 
     if (!handledByLookup && incomingText && (isAdminIntent(incomingText) || aiIntent === 'admin')) {
