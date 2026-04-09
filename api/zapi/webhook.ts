@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { searchCondoDocs } from '../../lib/condoDocs.js';
 import { firstName, isValidPersonName } from '../../lib/name.js';
+import fs from 'fs';
+import path from 'path';
 import {
   isAdminIntent,
   isAffirmative,
@@ -86,6 +88,88 @@ function shouldSuppressBotReply(clientPayload: any, message: string) {
 function greetSuffix(name: string) {
   const n = String(name || '').trim();
   return n ? `, ${n}` : '';
+}
+
+function formatDocSource(doc: string, page: number) {
+  const d = String(doc || '').trim();
+  if (!d) return '';
+  const p = Number(page || 0) || 0;
+  return p > 0 ? `${d}, pág. ${p}` : d;
+}
+
+function findPdfByKind(kind: 'regimento' | 'convencao') {
+  try {
+    const root = process.cwd();
+    const entries = fs.readdirSync(root);
+    const pdfs = entries.filter((f) => f.toLowerCase().endsWith('.pdf'));
+    const simplified = (s: string) => simplifyText(String(s || ''));
+    const scored = pdfs
+      .map((f) => {
+        const s = simplified(f);
+        const scoreReg = s.includes('regimento') ? 3 : 0;
+        const scoreConv = s.includes('convencao') || s.includes('conven') ? 3 : 0;
+        return { fileName: f, score: kind === 'regimento' ? scoreReg : scoreConv };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    const picked = scored.find((x) => x.score > 0)?.fileName;
+    if (picked) return path.join(root, picked);
+    return pdfs.length ? path.join(root, pdfs[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function geminiPdfAnswer(params: { question: string; kind: 'regimento' | 'convencao' }) {
+  const apiKey = String(process.env.GOOGLE_API_KEY || '').trim();
+  if (!apiKey) return null;
+
+  const pdfPath = findPdfByKind(params.kind);
+  if (!pdfPath) return null;
+
+  try {
+    const buf = fs.readFileSync(pdfPath);
+    const b64 = buf.toString('base64');
+    const prompt =
+      'Responda a pergunta do morador usando APENAS o conteúdo do PDF anexado (Convenção/Regimento). ' +
+      'Se não estiver explícito no documento, diga que não encontrou com clareza e peça 1 detalhe objetivo. ' +
+      'Quando encontrar, cite a referência (por exemplo: item 3.1, Art. 4, inciso XLI) e explique em linguagem simples. ' +
+      'Retorne SOMENTE JSON: {"answer": string}.\n\nPergunta: ' +
+      params.question;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 9000);
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: prompt },
+                { inlineData: { mimeType: 'application/pdf', data: b64 } },
+              ],
+            },
+          ],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 420 },
+        }),
+        signal: controller.signal,
+      },
+    );
+    clearTimeout(timeout);
+    const json: any = await res.json().catch(() => null);
+    const text = String(json?.candidates?.[0]?.content?.parts?.[0]?.text ?? '').trim();
+    if (!res.ok || !text) return null;
+    const parsed = extractJsonObject(text) as any;
+    const answer = String(parsed?.answer ?? '').trim();
+    if (!answer) return null;
+    return { answer };
+  } catch {
+    return null;
+  }
 }
 
 function isAboutAssistantQuestion(input: string) {
@@ -937,6 +1021,12 @@ async function generateConversationalReply(params: {
 async function answerWithCondoDocs(question: string) {
   const hits = await searchCondoDocs(question, 6).catch(() => [] as any[]);
   if (hits.length === 0) {
+    const q = simplifyText(question);
+    const kind = q.includes('assemble') || q.includes('convenc') ? 'convencao' : 'regimento';
+    const g = await geminiPdfAnswer({ question, kind }).catch(() => null);
+    if (g?.answer) {
+      return { answer: g.answer, sources: [] as { doc: string; page: number; excerpt: string }[] };
+    }
     return {
       answer:
         'Entendi sua dúvida. Eu não encontrei essa informação com clareza na Convenção ou no Regimento usando os termos enviados. Você pode me dar mais detalhes (por exemplo: qual área/assunto e qual situação aconteceu)?',
@@ -1038,10 +1128,11 @@ async function answerWithCondoDocs(question: string) {
 
     const answerSimplified = simplifyText(answer);
     if (answerSimplified.includes('nao encontrei') || answerSimplified.includes('não encontrei') || answerSimplified.includes('sem clareza')) {
-      return {
-        answer,
-        sources: [],
-      };
+      const q = simplifyText(question);
+      const kind = q.includes('assemble') || q.includes('convenc') ? 'convencao' : 'regimento';
+      const g = await geminiPdfAnswer({ question, kind }).catch(() => null);
+      if (g?.answer) return { answer: g.answer, sources: [] };
+      return { answer, sources: [] };
     }
 
     return { answer, sources: finalSources };
@@ -1802,7 +1893,7 @@ export default async function handler(req: any, res: any) {
           if (src.length) {
             lines.push('');
             lines.push('Onde encontrei:');
-            for (const s of src) lines.push(`${s.doc}, pág. ${s.page}`);
+            for (const s of src) lines.push(formatDocSource(s.doc, s.page));
             const excerpt = String(src[0]?.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
             if (excerpt) {
               lines.push('');
@@ -2273,7 +2364,7 @@ export default async function handler(req: any, res: any) {
             if (src.length) {
               lines.push('');
               lines.push('Onde encontrei:');
-              for (const s of src) lines.push(`${s.doc}, pág. ${s.page}`);
+              for (const s of src) lines.push(formatDocSource(s.doc, s.page));
               const excerpt = String(src[0]?.excerpt ?? '').replace(/\s+/g, ' ').trim().slice(0, 220);
               if (excerpt) {
                 lines.push('');
