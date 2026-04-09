@@ -139,6 +139,9 @@ export default async function handler(req: AnyReq, res: AnyRes) {
     const region = String(process.env.VERCEL_REGION || '').trim();
     const vercelUrl = String(process.env.VERCEL_URL || '').trim();
 
+    const hasOpenAiKey = Boolean(String(process.env.OPENAI_API_KEY || '').trim());
+    const hasGeminiKey = Boolean(String(process.env.GOOGLE_API_KEY || '').trim());
+
     json(res, 200, {
       ok: true,
       sha: gitSha || null,
@@ -146,6 +149,8 @@ export default async function handler(req: AnyReq, res: AnyRes) {
       env: vercelEnv || null,
       region: region || null,
       url: vercelUrl ? `https://${vercelUrl}` : null,
+      hasOpenAiKey,
+      hasGeminiKey,
       serverTime: new Date().toISOString(),
     });
     return;
