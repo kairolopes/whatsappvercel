@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { searchCondoDocs } from '../lib/condoDocs.js';
+import { firstName, isValidPersonName } from '../lib/name.js';
 import {
   isAdminIntent,
   isAffirmative,
@@ -65,6 +66,42 @@ function pickVariant(seed: string, variants: string[]) {
   if (list.length === 0) return '';
   const idx = hashSeed(seed) % list.length;
   return list[idx];
+}
+
+function replyHash(text: string) {
+  return hashSeed(String(text || ''));
+}
+
+function shouldSuppressBotReply(clientPayload: any, message: string) {
+  const payload = clientPayload && typeof clientPayload === 'object' ? clientPayload : {};
+  const lastHash = Number(payload.last_bot_reply_hash ?? 0) || 0;
+  const lastAt = Number(payload.last_bot_reply_at ?? 0) || 0;
+  const now = Date.now();
+  const h = replyHash(message);
+  const tooSoon = lastAt && now - lastAt < 30_000;
+  if (tooSoon && lastHash && lastHash === h) return true;
+  return false;
+}
+
+function greetSuffix(name: string) {
+  const n = String(name || '').trim();
+  return n ? `, ${n}` : '';
+}
+
+function isAboutAssistantQuestion(input: string) {
+  const s = simplifyText(String(input || ''));
+  if (!s) return false;
+  const patterns = [
+    'o que voce faz',
+    'oq voce faz',
+    'me fale de voce',
+    'me fala de voce',
+    'como funciona',
+    'como voce funciona',
+    'vc faz o que',
+    'voce faz o que',
+  ];
+  return patterns.some((p) => s.includes(p));
 }
 
 function extractPreferredName(input: string, allowSingleWord: boolean) {
@@ -279,8 +316,8 @@ function buildOptionsMenu() {
 }
 
 function getAiSignatureName(): string {
-  const s = String(process.env.MAKE_SIGNATURE_NAME || 'Síndico X').trim();
-  return s || 'Síndico X';
+  const s = String(process.env.MAKE_SIGNATURE_NAME || 'Assistente do Condomínio').trim();
+  return s || 'Assistente do Condomínio';
 }
 
 function shouldAutoReply(): boolean {
@@ -1312,16 +1349,47 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    const nameForChat = preferredName || senderDisplayName;
+    const resolvedPreferred = isValidPersonName(preferredName) ? firstName(preferredName) : '';
+    const resolvedWhatsapp = isValidPersonName(senderDisplayName) ? firstName(senderDisplayName) : '';
+    const nameForChat = resolvedPreferred || resolvedWhatsapp;
+
+    if (preferredName && !resolvedPreferred) {
+      try {
+        await supabase.from('clients').update({ preferred_name: null }).eq('phone', phoneDigits);
+        preferredName = '';
+      } catch {
+      }
+    }
 
     let onboardingState = String(supportState || '').trim();
     const onboardingSeed = `${phoneDigits}:${messageId || ''}:${incomingText || ''}`;
 
+    if (!handledByLookup && incomingText && (isAboutAssistantQuestion(incomingText) || isIdentityQuestion(incomingText))) {
+      const who = `Sou o ${signature} e eu ajudo moradores com boletos, reservas de ambientes, contato com a administração e dúvidas sobre regras do condomínio (Convenção/Regimento).`;
+      const finalText = signedText(signature, `${who}\n\nComo posso te ajudar agora${greetSuffix(nameForChat)}?\n\n${buildOptionsMenu()}`);
+      try {
+        if (!shouldSuppressBotReply(supportPayload, finalText)) {
+          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        }
+        await supabase
+          .from('clients')
+          .update({ support_state: null, support_payload: { ...supportPayload, last_bot_reply_hash: replyHash(finalText), last_bot_reply_at: Date.now() } })
+          .eq('phone', phoneDigits);
+      } catch {
+      }
+      handledByLookup = true;
+    }
+
     if (!handledByLookup && incomingText && isMenuRequest(incomingText)) {
       const finalText = signedText(signature, `Claro. Aqui estão as opções:\n\n${buildOptionsMenu()}`);
       try {
-        await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-        await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+        if (!shouldSuppressBotReply(supportPayload, finalText)) {
+          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+        }
+        await supabase
+          .from('clients')
+          .update({ support_state: null, support_payload: { ...supportPayload, last_bot_reply_hash: replyHash(finalText), last_bot_reply_at: Date.now() } })
+          .eq('phone', phoneDigits);
       } catch {
       }
       handledByLookup = true;
@@ -1590,7 +1658,7 @@ export default async function handler(req: any, res: any) {
       } else {
         const convo = await generateConversationalReply({
           signature,
-          preferredName: nameForChat,
+          preferredName: resolvedPreferred,
           hasUnit: Boolean(clientApartment && clientBlock),
           message: incomingText,
         });
@@ -1684,7 +1752,7 @@ export default async function handler(req: any, res: any) {
           if (clientApartment && clientBlock) {
             const convo = await generateConversationalReply({
               signature,
-              preferredName: nameForChat,
+              preferredName: resolvedPreferred,
               hasUnit: true,
               message: incomingText,
             });
@@ -1841,7 +1909,7 @@ export default async function handler(req: any, res: any) {
           } else if (greetings.has(simplified) || isMenuRequest(incomingText) || isIdentityQuestion(incomingText) || ai.intent === 'greeting' || ai.intent === 'other') {
             const convo = await generateConversationalReply({
               signature,
-              preferredName: nameForChat,
+              preferredName: resolvedPreferred,
               hasUnit: Boolean(clientApartment && clientBlock),
               message: incomingText,
             });
@@ -1914,7 +1982,7 @@ export default async function handler(req: any, res: any) {
           if (!handledByLookup && (greetingSet.has(simplified) || isNotDocs)) {
             const convo = await generateConversationalReply({
               signature,
-              preferredName: nameForChat,
+              preferredName: resolvedPreferred,
               hasUnit: Boolean(clientApartment && clientBlock),
               message: q,
             });
