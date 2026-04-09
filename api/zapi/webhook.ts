@@ -180,7 +180,6 @@ function isAboutAssistantQuestion(input: string) {
     'oq voce faz',
     'me fale de voce',
     'me fala de voce',
-    'como funciona',
     'como voce funciona',
     'vc faz o que',
     'voce faz o que',
