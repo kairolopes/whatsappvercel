@@ -231,11 +231,22 @@ function mustTermsFromQuestion(question: string) {
     if (tt && !terms.includes(tt)) terms.push(tt);
   };
 
+  if (s.includes('assembleia') || s.includes('assembleias')) {
+    add('assembleia');
+    add('assembleias');
+  }
+  if (s.includes('3 1') || s.includes('3.1') || s.includes('item 3 1')) add('3 1');
+
   if (s.includes('piscina')) add('piscina');
   if (s.includes('visitante') || s.includes('convidad')) add('visitante');
   if (s.includes('obra') || s.includes('reforma')) {
     add('obra');
     add('reforma');
+  }
+  if (s.includes('agua') || s.includes('água') || s.includes('hidrom') || s.includes('hidr')) {
+    add('agua');
+    add('xli');
+    add('art 4');
   }
   if (s.includes('barulho') || s.includes('som') || s.includes('silencio')) add('barulho');
   if (s.includes('pet') || s.includes('cachorro') || s.includes('gato')) add('pet');

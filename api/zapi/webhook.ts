@@ -1019,6 +1019,24 @@ async function generateConversationalReply(params: {
 }
 
 async function answerWithCondoDocs(question: string) {
+  const qSimplified0 = simplifyText(question);
+  const isAssembleia = qSimplified0.includes('assembleia') || qSimplified0.includes('assembleias');
+  const mentionsConvencao = qSimplified0.includes('convencao') || qSimplified0.includes('conven');
+  const mentionsItem = qSimplified0.includes('item') || qSimplified0.includes('capitulo') || qSimplified0.includes('capítulo');
+  const mentions31 = qSimplified0.includes('3 1') || qSimplified0.includes('3.1');
+  const isAgua = qSimplified0.includes('agua') || qSimplified0.includes('água') || qSimplified0.includes('hidrom') || qSimplified0.includes('hidr');
+  const isCobranca = qSimplified0.includes('cobrad') || qSimplified0.includes('cobr');
+
+  const preferGeminiKind: 'regimento' | 'convencao' | null =
+    isAssembleia || mentionsConvencao || mentions31 || mentionsItem ? 'convencao' : isAgua || isCobranca ? 'regimento' : null;
+
+  if (preferGeminiKind) {
+    const g = await geminiPdfAnswer({ question, kind: preferGeminiKind }).catch(() => null);
+    if (g?.answer) {
+      return { answer: g.answer, sources: [] as { doc: string; page: number; excerpt: string }[] };
+    }
+  }
+
   const hits = await searchCondoDocs(question, 6).catch(() => [] as any[]);
   if (hits.length === 0) {
     const q = simplifyText(question);
@@ -1065,6 +1083,11 @@ async function answerWithCondoDocs(question: string) {
   const relevantSources = must.length
     ? sources.filter((s) => must.some((t) => simplifyText(s.context).includes(t)))
     : sources;
+
+  if (!relevantSources.length && preferGeminiKind) {
+    const g = await geminiPdfAnswer({ question, kind: preferGeminiKind }).catch(() => null);
+    if (g?.answer) return { answer: g.answer, sources: [] };
+  }
 
   const apiKey = getOpenAiKey();
   if (!apiKey) {
