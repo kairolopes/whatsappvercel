@@ -1086,6 +1086,18 @@ async function answerWithCondoDocs(question: string) {
     ? sources.filter((s) => must.some((t) => simplifyText(s.context).includes(t)))
     : sources;
 
+  const isWaterBilling = qSimplified.includes('agua') && (qSimplified.includes('cobr') || qSimplified.includes('rateio') || qSimplified.includes('conta'));
+  if (isWaterBilling) {
+    const waterSource = relevantSources.find((s) => simplifyText(s.context).includes('xli'));
+    if (waterSource) {
+      return {
+        answer:
+          'No Regimento Interno (Art. 4, inciso XLI), a regra é que a conta de água de cada unidade seja individualizada e a água das áreas comuns entre no rateio da taxa condominial. Se houver instalação de medidores, a despesa de instalação é do morador (conforme o trecho).',
+        sources: [{ doc: waterSource.doc, page: waterSource.page, excerpt: waterSource.excerpt }],
+      };
+    }
+  }
+
   if (!relevantSources.length && preferGeminiKind) {
     const g = await geminiPdfAnswer({ question, kind: preferGeminiKind }).catch(() => null);
     if (g?.answer) return { answer: g.answer, sources: [] };
