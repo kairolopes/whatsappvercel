@@ -2744,7 +2744,24 @@ export default async function handler(req: any, res: any) {
 
         const finalText = signedText(signature, lines.join('\n'));
         try {
-          await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          const resp: any = await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
+          const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
+          await supabase.from('messages').insert([
+            {
+              conversation_id: upsertedConv.id,
+              text: finalText,
+              sender: 'user',
+              timestamp: formatTimeHM(new Date()),
+              status: 'sent',
+              external_id: externalId || null,
+              kind: 'text',
+              meta: { action: 'docs_answer', ai: true, sources: src, question: incomingText },
+            },
+          ]);
+          await supabase
+            .from('conversations')
+            .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
+            .eq('id', upsertedConv.id);
           await supabase
             .from('clients')
             .update({ support_state: 'docs_active', support_topic: 'regimento_convencao', support_started_at: new Date().toISOString(), support_payload: {} })
