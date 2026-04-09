@@ -944,23 +944,85 @@ async function answerWithCondoDocs(question: string) {
     };
   }
 
-  const first = hits[0];
-  const excerpt = String(first?.snippet ?? '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 320);
+  const sources = hits
+    .slice(0, 4)
+    .map((h: any) => ({
+      doc: String(h?.docName ?? '').trim(),
+      page: Number(h?.page ?? 0) || 0,
+      excerpt: String(h?.snippet ?? '').replace(/\s+/g, ' ').trim().slice(0, 420),
+      context: String(h?.context ?? '').replace(/\s+/g, ' ').trim().slice(0, 1800),
+    }))
+    .filter((s) => s.doc && s.page > 0 && s.context);
 
-  return {
-    answer:
-      `Entendi sua dúvida. Pelo que consta nos documentos, encontrei o seguinte trecho relacionado ao seu tema. Se você me disser sua situação (dia/horário/local), eu te ajudo a aplicar na prática.`,
-    sources: [
-      {
-        doc: String(first?.docName ?? '').trim(),
-        page: Number(first?.page ?? 0) || 0,
-        excerpt,
+  const apiKey = getOpenAiKey();
+  if (!apiKey) {
+    const first = sources[0];
+    return {
+      answer:
+        'Encontrei estes trechos nos documentos. Se você me disser sua situação (dia/horário/local), eu te ajudo a aplicar na prática.',
+      sources: first ? [{ doc: first.doc, page: first.page, excerpt: first.excerpt }] : [],
+    };
+  }
+
+  try {
+    const model = getAiModel();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
       },
-    ].filter((s) => s.doc && s.page > 0 && s.excerpt),
-  };
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: 320,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Você responde dúvidas de condomínio usando SOMENTE os trechos fornecidos (Regimento/Convenção). Se não houver base suficiente, diga que não encontrou com clareza e peça 1 detalhe objetivo (ex.: local/horário/assunto). Retorne SOMENTE JSON: {"answer": string, "used": number[]}.',
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({ question, sources: sources.map((s, i) => ({ i, doc: s.doc, page: s.page, text: s.context })) }),
+          },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const json = await res.json().catch(() => null);
+    const content = String(json?.choices?.[0]?.message?.content ?? '');
+    const parsed = extractJsonObject(content) as any;
+    const answer = String(parsed?.answer ?? '').trim();
+    const used = Array.isArray(parsed?.used) ? parsed.used.map((x: any) => Number(x)).filter((n: any) => Number.isFinite(n)) : [];
+    const picked = used.length ? used.slice(0, 2) : [0];
+    const finalSources = picked
+      .map((idx) => sources[idx])
+      .filter(Boolean)
+      .map((s) => ({ doc: s.doc, page: s.page, excerpt: s.excerpt }));
+
+    if (!answer) {
+      const first = finalSources[0];
+      return {
+        answer:
+          'Eu não encontrei essa informação com clareza na Convenção ou no Regimento usando os termos enviados. Você pode me dizer qual área/assunto e qual situação aconteceu?',
+        sources: first ? [first] : [],
+      };
+    }
+
+    return { answer, sources: finalSources };
+  } catch {
+    const first = sources[0];
+    return {
+      answer:
+        'Eu não consegui consultar a resposta com clareza agora. Você pode me dizer qual área/assunto e qual situação aconteceu?',
+      sources: first ? [{ doc: first.doc, page: first.page, excerpt: first.excerpt }] : [],
+    };
+  }
 }
 
 function getWebhookMessageData(payload: any): { kind: string; text: string | null; meta: AnyRecord } {

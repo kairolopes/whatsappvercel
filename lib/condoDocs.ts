@@ -16,6 +16,14 @@ type LoadedDocs = {
 
 let cache: LoadedDocs | null = null;
 
+type EmbeddingCache = {
+  pages: DocPage[];
+  vectors: number[][];
+  loadedAt: number;
+};
+
+let embeddingCache: EmbeddingCache | null = null;
+
 function simplify(input: string) {
   return String(input || '')
     .trim()
@@ -25,6 +33,51 @@ function simplify(input: string) {
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function prepareForEmbedding(text: string) {
+  const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+  return cleaned.length > 2000 ? cleaned.slice(0, 2000) : cleaned;
+}
+
+function dot(a: number[], b: number[]) {
+  let s = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
+}
+
+function norm(a: number[]) {
+  return Math.sqrt(dot(a, a));
+}
+
+function cosineSim(a: number[], b: number[]) {
+  const na = norm(a);
+  const nb = norm(b);
+  if (!na || !nb) return 0;
+  return dot(a, b) / (na * nb);
+}
+
+async function embedTextsOpenAi(inputs: string[]) {
+  const apiKey = String(process.env.OPENAI_API_KEY || '').trim();
+  if (!apiKey) return null;
+  const res = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'text-embedding-3-small',
+      input: inputs,
+    }),
+  });
+  const json: any = await res.json().catch(() => null);
+  if (!res.ok) return null;
+  const data = Array.isArray(json?.data) ? json.data : [];
+  const vectors = data.map((d: any) => d?.embedding).filter((v: any) => Array.isArray(v)) as number[][];
+  if (vectors.length !== inputs.length) return null;
+  return vectors;
 }
 
 function pickDocsFromRoot(rootDir: string) {
@@ -116,11 +169,62 @@ export async function loadCondoDocsPages() {
   return pages;
 }
 
+async function loadEmbeddings(pages: DocPage[]) {
+  const ttlMs = 60 * 60 * 1000;
+  if (embeddingCache && Date.now() - embeddingCache.loadedAt < ttlMs) {
+    if (embeddingCache.pages.length === pages.length) return embeddingCache;
+  }
+
+  const inputs = pages.map((p) => prepareForEmbedding(p.text));
+  const vectors = await embedTextsOpenAi(inputs);
+  if (!vectors) return null;
+  embeddingCache = { pages, vectors, loadedAt: Date.now() };
+  return embeddingCache;
+}
+
 function tokenizeQuery(q: string) {
   const s = simplify(q);
   if (!s) return [];
-  const tokens = s.split(' ').filter((t) => t.length >= 3);
-  return Array.from(new Set(tokens));
+  const stop = new Set([
+    'como',
+    'qual',
+    'quais',
+    'que',
+    'o',
+    'a',
+    'os',
+    'as',
+    'de',
+    'da',
+    'do',
+    'das',
+    'dos',
+    'no',
+    'na',
+    'nos',
+    'nas',
+    'para',
+    'por',
+    'com',
+    'sem',
+    'um',
+    'uma',
+    'sobre',
+    'pode',
+    'posso',
+    'permitido',
+    'proibido',
+    'horario',
+    'horarios',
+    'horário',
+    'horários',
+    'regra',
+    'regras',
+  ]);
+  const tokens = s
+    .split(' ')
+    .filter((t) => t.length >= 3 && !stop.has(t));
+  return Array.from(new Set(tokens)).slice(0, 16);
 }
 
 function scoreText(text: string, tokens: string[]) {
@@ -161,6 +265,33 @@ export async function searchCondoDocs(question: string, limit = 6) {
   const pages = await loadCondoDocsPages();
   const tokens = tokenizeQuery(question);
   if (!tokens.length) return [];
+
+  const emb = await loadEmbeddings(pages);
+  if (emb) {
+    const qVecs = await embedTextsOpenAi([prepareForEmbedding(question)]);
+    const qVec = qVecs?.[0];
+    if (qVec) {
+      const scored = emb.pages
+        .map((p, idx) => {
+          const sim = cosineSim(qVec, emb.vectors[idx]);
+          const lex = scoreText(p.text, tokens);
+          const score = sim * 0.85 + Math.min(1, lex / 20) * 0.15;
+          return { page: p, score, sim, lex };
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, Math.max(1, limit));
+
+      return scored.map((s) => ({
+        docName: s.page.docName,
+        fileName: s.page.fileName,
+        page: s.page.page,
+        snippet: buildSnippet(s.page.text, tokens),
+        score: s.score,
+        context: prepareForEmbedding(s.page.text),
+      }));
+    }
+  }
+
   const scored = pages
     .map((p) => ({
       page: p,
@@ -176,6 +307,6 @@ export async function searchCondoDocs(question: string, limit = 6) {
     page: s.page.page,
     snippet: buildSnippet(s.page.text, tokens),
     score: s.score,
+    context: prepareForEmbedding(s.page.text),
   }));
 }
-
