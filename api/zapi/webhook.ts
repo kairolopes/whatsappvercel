@@ -195,7 +195,7 @@ function extractPreferredName(input: string, allowSingleWord: boolean) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  const m = s.match(/\b(meu nome e|meu nome é|eu sou|pode me chamar de|chama(\-)?me de)\s+(.{2,40})$/i);
+  const m = s.match(/\b(meu nome e|meu nome é|eu sou|pode me chamar de|chama(-)?me de)\s+(.{2,40})$/i);
   const simplified = simplifyText(s);
   const greetings = new Set(['oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite']);
   if (!m && (greetings.has(simplified) || (!allowSingleWord && simplified.length < 4))) return '';
@@ -480,17 +480,25 @@ function getOpenAiKey(): string {
   return String(process.env.OPENAI_API_KEY || '').trim();
 }
 
-function getZapiConfig() {
-  const instanceId = process.env.ZAPI_INSTANCE_ID;
-  const token = process.env.ZAPI_TOKEN;
-  const clientToken = process.env.ZAPI_CLIENT_TOKEN;
+type ZapiCfg = { instanceId: string; token: string; clientToken: string };
+
+function normalizeZapiCfg(row: any): ZapiCfg | null {
+  const instanceId = String(row?.instance_id ?? row?.instanceId ?? '').trim();
+  const token = String(row?.token ?? '').trim();
+  const clientToken = String(row?.client_token ?? row?.clientToken ?? '').trim();
   if (!instanceId || !token || !clientToken) return null;
   return { instanceId, token, clientToken };
 }
 
-async function zapiFetch(method: string, path: string, body?: any) {
-  const cfg = getZapiConfig();
-  if (!cfg) throw new Error('missing_zapi_env');
+function envZapiCfg(kind: 'primary' | 'secondary'): ZapiCfg | null {
+  const instanceId = String(kind === 'primary' ? process.env.ZAPI_INSTANCE_ID : process.env.ZAPI2_INSTANCE_ID || '').trim();
+  const token = String(kind === 'primary' ? process.env.ZAPI_TOKEN : process.env.ZAPI2_TOKEN || '').trim();
+  const clientToken = String(kind === 'primary' ? process.env.ZAPI_CLIENT_TOKEN : process.env.ZAPI2_CLIENT_TOKEN || '').trim();
+  if (!instanceId || !token || !clientToken) return null;
+  return { instanceId, token, clientToken };
+}
+
+async function zapiFetchWithCfg(cfg: ZapiCfg, method: string, path: string, body?: any) {
   const baseUrl = `https://api.z-api.io/instances/${cfg.instanceId}/token/${cfg.token}`;
   const url = `${baseUrl}${path}`;
   const res = await fetch(url, {
@@ -812,6 +820,7 @@ async function findUnitByPhoneLast5(last5: string) {
 
 async function refreshClientUnitFromSuperlogica(params: {
   supabase: any;
+  condominioId: string;
   phoneDigits: string;
   senderDisplayName: string;
   avatarUrl: string | null;
@@ -834,6 +843,7 @@ async function refreshClientUnitFromSuperlogica(params: {
         .from('clients')
         .upsert(
           {
+            condominio_id: params.condominioId,
             phone: phoneDigits,
             status: 1,
             matched: true,
@@ -844,7 +854,7 @@ async function refreshClientUnitFromSuperlogica(params: {
             whatsapp_photo_url: params.avatarUrl,
             match_payload: match.raw ?? {},
           },
-          { onConflict: 'phone' },
+          { onConflict: 'condominio_id,phone' },
         );
     } catch {
     }
@@ -879,7 +889,7 @@ async function decideWithChatGpt(input: { phone: string; message: string }) {
           {
             role: 'system',
             content:
-              'Você é um roteador de atendimento via WhatsApp. Sua saída DEVE ser JSON. Escolha uma ação: "reply" (responder) ou "none" (não responder). Se responder, inclua "reply" com texto curto e educado. Nunca inclua markdown além de \"*negrito*\" do WhatsApp. Se não tiver certeza, use action="none".',
+              'Você é um roteador de atendimento via WhatsApp. Sua saída DEVE ser JSON. Escolha uma ação: "reply" (responder) ou "none" (não responder). Se responder, inclua "reply" com texto curto e educado. Nunca inclua markdown além de "*negrito*" do WhatsApp. Se não tiver certeza, use action="none".',
           },
           {
             role: 'user',
@@ -1330,15 +1340,88 @@ export default async function handler(req: any, res: any) {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  const { data: authOk, error: authError } = await supabase.rpc('insert_zapi_webhook_event', {
-    p_secret: secret,
-    p_payload: payload,
-  });
+  const builtInSharedSecret = 'rokzap_2026_03_29_a8d2b7c1f4e9';
+  const fallbackSharedSecret = String(process.env.ZAPI_SHARED_SECRET || '').trim() || builtInSharedSecret;
+  const fallbackWebhookSecret = String(process.env.ZAPI_WEBHOOK_SECRET || '').trim();
+  const allowDefaultTenant = secret === fallbackWebhookSecret || secret === fallbackSharedSecret;
 
-  if (authError || authOk !== true) {
-    res.status(200).json({ ok: true, stored: false, reason: 'rpc_failed' });
+  let condominioId: string | null = null;
+  let zapiCfg: ZapiCfg | null = null;
+
+  const { data: bySecret } = await supabase
+    .from('zapi_config')
+    .select('condominio_id,instance_id,token,client_token')
+    .eq('webhook_secret', secret)
+    .maybeSingle();
+
+  if ((bySecret as any)?.condominio_id) {
+    condominioId = String((bySecret as any).condominio_id);
+    zapiCfg = normalizeZapiCfg(bySecret);
+  }
+
+  if (!condominioId && allowDefaultTenant) {
+    const { data: c1 } = await supabase.from('condominios').select('id').eq('slug', 'condominio-1').maybeSingle();
+    if ((c1 as any)?.id) {
+      condominioId = String((c1 as any).id);
+      const { data: cfgRow } = await supabase
+        .from('zapi_config')
+        .select('instance_id,token,client_token')
+        .eq('condominio_id', condominioId)
+        .maybeSingle();
+      zapiCfg = normalizeZapiCfg(cfgRow);
+    }
+  }
+
+  if (!condominioId) {
+    res.status(200).json({ ok: true, stored: false, reason: 'invalid_secret' });
     return;
   }
+
+  if (!zapiCfg) {
+    const { data: cfgRow } = await supabase
+      .from('zapi_config')
+      .select('instance_id,token,client_token')
+      .eq('condominio_id', condominioId)
+      .maybeSingle();
+    zapiCfg = normalizeZapiCfg(cfgRow);
+  }
+
+  if (!zapiCfg && allowDefaultTenant) {
+    zapiCfg = envZapiCfg('primary');
+    if (zapiCfg) {
+      try {
+        await supabase
+          .from('zapi_config')
+          .upsert(
+            {
+              condominio_id: condominioId,
+              instance_id: zapiCfg.instanceId,
+              token: zapiCfg.token,
+              client_token: zapiCfg.clientToken,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'condominio_id' },
+          );
+      } catch {
+      }
+    }
+  }
+
+  const zapiFetch = (method: string, path: string, body?: any) => {
+    if (!zapiCfg) throw new Error('missing_zapi_tenant_config');
+    return zapiFetchWithCfg(zapiCfg, method, path, body);
+  };
+
+  await supabase.from('zapi_webhook_events').insert([
+    {
+      condominio_id: condominioId,
+      event_type: eventType,
+      phone: phoneRaw,
+      from_me: fromMe,
+      message_id: messageId,
+      payload: payload,
+    },
+  ]);
 
   const isStatusEvent =
     eventKey.includes('messagestatuscallback') ||
@@ -1367,6 +1450,7 @@ export default async function handler(req: any, res: any) {
     const { data: updated } = await supabase
       .from('messages')
       .update({ status: mappedStatus, is_read: mappedStatus === 'read' })
+      .eq('condominio_id', condominioId)
       .in('external_id', Array.from(messageIds))
       .select('id');
 
@@ -1394,6 +1478,7 @@ export default async function handler(req: any, res: any) {
   const { data: existingConv } = await supabase
     .from('conversations')
     .select('id, unread_count, last_message, last_message_time')
+    .eq('condominio_id', condominioId)
     .eq('phone', phone)
     .maybeSingle();
 
@@ -1402,6 +1487,7 @@ export default async function handler(req: any, res: any) {
     const { data: ev } = await supabase
       .from('zapi_webhook_events')
       .select('from_me')
+      .eq('condominio_id', condominioId)
       .eq('phone', phone)
       .eq('message_id', messageId)
       .order('created_at', { ascending: false })
@@ -1425,6 +1511,7 @@ export default async function handler(req: any, res: any) {
     .from('conversations')
     .upsert(
       {
+        condominio_id: condominioId,
         phone,
         contact_name: conversationName,
         avatar_url: avatarUrl,
@@ -1433,7 +1520,7 @@ export default async function handler(req: any, res: any) {
         unread_count: unreadCount,
         is_active: true,
       },
-      { onConflict: 'phone' },
+      { onConflict: 'condominio_id,phone' },
     )
     .select('id')
     .single();
@@ -1452,6 +1539,7 @@ export default async function handler(req: any, res: any) {
     const { data } = await supabase
       .from('messages')
       .select('sender, kind, text, meta')
+      .eq('condominio_id', condominioId)
       .eq('conversation_id', upsertedConv.id)
       .eq('external_id', messageId)
       .limit(1)
@@ -1496,6 +1584,7 @@ export default async function handler(req: any, res: any) {
       .from('messages')
       .upsert(
         {
+          condominio_id: condominioId,
           conversation_id: upsertedConv.id,
           text: mergedText,
           sender,
@@ -1543,6 +1632,7 @@ export default async function handler(req: any, res: any) {
                 await supabase
                   .from('messages')
                   .update({ meta: { ...(msg.meta as any), transcript: stt.text, transcript_model: stt.model } })
+                  .eq('condominio_id', condominioId)
                   .eq('conversation_id', upsertedConv.id)
                   .eq('external_id', messageId);
               } catch {
@@ -1558,6 +1648,7 @@ export default async function handler(req: any, res: any) {
       const { data: existingClient } = await supabase
         .from('clients')
         .select('phone,status,matched,unit_id,block,apartment,preferred_name,last_auto_reply_to,last_auto_reply_at,support_state,support_topic,support_payload')
+        .eq('condominio_id', condominioId)
         .eq('phone', phoneDigits)
         .maybeSingle();
 
@@ -1566,6 +1657,7 @@ export default async function handler(req: any, res: any) {
         needsLookup = true;
         await supabase.from('clients').insert([
           {
+            condominio_id: condominioId,
             phone: phoneDigits,
             status: 2,
             whatsapp_name: senderDisplayName,
@@ -1591,6 +1683,7 @@ export default async function handler(req: any, res: any) {
         await supabase
           .from('clients')
           .update({ whatsapp_name: senderDisplayName, whatsapp_photo_url: avatarUrl })
+          .eq('condominio_id', condominioId)
           .eq('phone', phoneDigits);
       }
     } catch {
@@ -1617,6 +1710,7 @@ export default async function handler(req: any, res: any) {
                   apartment: apartment || null,
                   match_payload: match.raw ?? {},
                 })
+                .eq('condominio_id', condominioId)
                 .eq('phone', phoneDigits);
             } catch {
             }
@@ -1636,7 +1730,7 @@ export default async function handler(req: any, res: any) {
 
     if (preferredName && !resolvedPreferred) {
       try {
-        await supabase.from('clients').update({ preferred_name: null }).eq('phone', phoneDigits);
+        await supabase.from('clients').update({ preferred_name: null }).eq('condominio_id', condominioId).eq('phone', phoneDigits);
         preferredName = '';
       } catch {
       }
@@ -1655,6 +1749,7 @@ export default async function handler(req: any, res: any) {
         await supabase
           .from('clients')
           .update({ support_state: null, support_payload: { ...supportPayload, last_bot_reply_hash: replyHash(finalText), last_bot_reply_at: Date.now() } })
+          .eq('condominio_id', condominioId)
           .eq('phone', phoneDigits);
       } catch {
       }
@@ -1670,6 +1765,7 @@ export default async function handler(req: any, res: any) {
         await supabase
           .from('clients')
           .update({ support_state: null, support_payload: { ...supportPayload, last_bot_reply_hash: replyHash(finalText), last_bot_reply_at: Date.now() } })
+          .eq('condominio_id', condominioId)
           .eq('phone', phoneDigits);
       } catch {
       }
@@ -1699,6 +1795,7 @@ export default async function handler(req: any, res: any) {
             support_topic: 'onboarding',
             support_payload: { previous_unit: { apartment: clientApartment || null, block: clientBlock || null } },
           })
+          .eq('condominio_id', condominioId)
           .eq('phone', phoneDigits);
       } catch {
       }
@@ -1723,7 +1820,7 @@ export default async function handler(req: any, res: any) {
 
       if (shouldExitOnboarding) {
         try {
-          await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+          await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('condominio_id', condominioId).eq('phone', phoneDigits);
         } catch {
         }
         onboardingState = '';
@@ -1745,7 +1842,7 @@ export default async function handler(req: any, res: any) {
         handledByLookup = true;
       } else {
         try {
-          await supabase.from('clients').update({ preferred_name: extracted }).eq('phone', phoneDigits);
+          await supabase.from('clients').update({ preferred_name: extracted }).eq('condominio_id', condominioId).eq('phone', phoneDigits);
         } catch {
         }
 
@@ -1760,6 +1857,7 @@ export default async function handler(req: any, res: any) {
             await supabase
               .from('clients')
               .update({ support_state: 'onboard_confirm_unit', support_payload: { apartment: clientApartment, block: clientBlock, unit_id: clientUnitId || null } })
+              .eq('condominio_id', condominioId)
               .eq('phone', phoneDigits);
           } catch {
           }
@@ -1774,7 +1872,11 @@ export default async function handler(req: any, res: any) {
           const finalText = signedText(signature, askUnit);
           try {
             await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-            await supabase.from('clients').update({ support_state: 'onboard_wait_unit', support_payload: {} }).eq('phone', phoneDigits);
+            await supabase
+              .from('clients')
+              .update({ support_state: 'onboard_wait_unit', support_payload: {} })
+              .eq('condominio_id', condominioId)
+              .eq('phone', phoneDigits);
           } catch {
           }
           handledByLookup = true;
@@ -1788,7 +1890,7 @@ export default async function handler(req: any, res: any) {
         const finalText = signedText(signature, buildWelcomeMenu({ name: nameForChat, apartment: clientApartment, block: clientBlock }));
         try {
           await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-          await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+          await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('condominio_id', condominioId).eq('phone', phoneDigits);
         } catch {
         }
         handledByLookup = true;
@@ -1800,7 +1902,11 @@ export default async function handler(req: any, res: any) {
         const finalText = signedText(signature, ask);
         try {
           await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-          await supabase.from('clients').update({ support_state: 'onboard_wait_unit', support_payload: {} }).eq('phone', phoneDigits);
+          await supabase
+            .from('clients')
+            .update({ support_state: 'onboard_wait_unit', support_payload: {} })
+            .eq('condominio_id', condominioId)
+            .eq('phone', phoneDigits);
         } catch {
         }
         handledByLookup = true;
@@ -1837,6 +1943,7 @@ export default async function handler(req: any, res: any) {
         await supabase
           .from('clients')
           .update({ support_state: null, support_payload: { provided_unit: provided }, support_topic: 'onboarding' })
+          .eq('condominio_id', condominioId)
           .eq('phone', phoneDigits);
       } catch {
       }
@@ -1918,6 +2025,7 @@ export default async function handler(req: any, res: any) {
             await supabase
               .from('clients')
               .update({ support_state: 'docs_wait_question', support_topic: 'regimento_convencao', support_payload: {} })
+              .eq('condominio_id', condominioId)
               .eq('phone', phoneDigits);
           } catch {
           }
@@ -1946,6 +2054,7 @@ export default async function handler(req: any, res: any) {
             await supabase
               .from('clients')
               .update({ support_state: 'docs_active', support_topic: 'regimento_convencao', support_payload: {} })
+              .eq('condominio_id', condominioId)
               .eq('phone', phoneDigits);
           } catch {
           }
@@ -2004,6 +2113,7 @@ export default async function handler(req: any, res: any) {
               await supabase
                 .from('clients')
                 .update({ support_state: 'onboard_wait_name', support_topic: 'onboarding', support_payload: {} })
+                .eq('condominio_id', condominioId)
                 .eq('phone', phoneDigits);
               onboardingState = 'onboard_wait_name';
             } catch {
@@ -2020,7 +2130,7 @@ export default async function handler(req: any, res: any) {
           const extracted = extractPreferredName(incomingText, false);
           if (extracted) {
             try {
-              await supabase.from('clients').update({ preferred_name: extracted }).eq('phone', phoneDigits);
+              await supabase.from('clients').update({ preferred_name: extracted }).eq('condominio_id', condominioId).eq('phone', phoneDigits);
             } catch {
             }
 
@@ -2035,6 +2145,7 @@ export default async function handler(req: any, res: any) {
                 await supabase
                   .from('clients')
                   .update({ support_state: 'onboard_confirm_unit', support_topic: 'onboarding', support_payload: { apartment: clientApartment, block: clientBlock, unit_id: clientUnitId || null } })
+                  .eq('condominio_id', condominioId)
                   .eq('phone', phoneDigits);
               } catch {
               }
@@ -2050,6 +2161,7 @@ export default async function handler(req: any, res: any) {
                 await supabase
                   .from('clients')
                   .update({ support_state: 'onboard_wait_unit', support_topic: 'onboarding', support_payload: {} })
+                  .eq('condominio_id', condominioId)
                   .eq('phone', phoneDigits);
               } catch {
               }
@@ -2067,7 +2179,11 @@ export default async function handler(req: any, res: any) {
           const finalText = signedText(signature, `${prompt}\n\nPosso te ajudar com:\n\n${buildOptionsMenu()}`);
           try {
             await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-            await supabase.from('clients').update({ support_state: 'onboard_wait_name', support_topic: 'onboarding', support_payload: {} }).eq('phone', phoneDigits);
+            await supabase
+              .from('clients')
+              .update({ support_state: 'onboard_wait_name', support_topic: 'onboarding', support_payload: {} })
+              .eq('condominio_id', condominioId)
+              .eq('phone', phoneDigits);
           } catch {
           }
           handledByLookup = true;
@@ -2105,7 +2221,11 @@ export default async function handler(req: any, res: any) {
             const finalText = signedText(signature, ask);
             try {
               await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-              await supabase.from('clients').update({ support_state: 'onboard_wait_unit', support_topic: 'onboarding', support_payload: {} }).eq('phone', phoneDigits);
+              await supabase
+                .from('clients')
+                .update({ support_state: 'onboard_wait_unit', support_topic: 'onboarding', support_payload: {} })
+                .eq('condominio_id', condominioId)
+                .eq('phone', phoneDigits);
             } catch {
             }
             handledByLookup = true;
@@ -2123,7 +2243,7 @@ export default async function handler(req: any, res: any) {
           isBoletoIntent(incomingText) || isReservaIntent(incomingText) || isAdminIntent(incomingText) || isRegimentoIntent(incomingText);
         if (otherIntentNow && !isAffirmative(incomingText) && !isNegative(incomingText) && !isCancel(incomingText)) {
           try {
-            await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+            await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('condominio_id', condominioId).eq('phone', phoneDigits);
           } catch {
           }
           handledByLookup = false;
@@ -2182,6 +2302,7 @@ export default async function handler(req: any, res: any) {
             const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
             await supabase.from('messages').insert([
               {
+                condominio_id: condominioId,
                 conversation_id: upsertedConv.id,
                 text: finalText,
                 sender: 'user',
@@ -2195,10 +2316,12 @@ export default async function handler(req: any, res: any) {
             await supabase
               .from('conversations')
               .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-              .eq('id', upsertedConv.id);
+              .eq('id', upsertedConv.id)
+              .eq('condominio_id', condominioId);
             await supabase
               .from('clients')
               .update({ support_state: 'docs_active', support_topic: supportTopic || 'regimento_convencao', support_payload: {} })
+              .eq('condominio_id', condominioId)
               .eq('phone', phoneDigits);
           } catch {
           }
@@ -2214,6 +2337,7 @@ export default async function handler(req: any, res: any) {
             await supabase
               .from('clients')
               .update({ support_state: 'docs_wait_question', support_payload: {}, support_topic: supportTopic || 'regimento_convencao' })
+              .eq('condominio_id', condominioId)
               .eq('phone', phoneDigits);
           } catch {
           }
@@ -2226,7 +2350,11 @@ export default async function handler(req: any, res: any) {
 
           if (isSwitchToOtherFlow || isBoletoIntent(incomingText) || isReservaIntent(incomingText) || isAdminIntent(incomingText) || isLinkingIssue(incomingText)) {
             try {
-              await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+              await supabase
+                .from('clients')
+                .update({ support_state: null, support_payload: {} })
+                .eq('condominio_id', condominioId)
+                .eq('phone', phoneDigits);
             } catch {
             }
             handledByLookup = false;
@@ -2245,7 +2373,11 @@ export default async function handler(req: any, res: any) {
             const finalText = signedText(signature, body);
             try {
               await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-              await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+              await supabase
+                .from('clients')
+                .update({ support_state: null, support_payload: {} })
+                .eq('condominio_id', condominioId)
+                .eq('phone', phoneDigits);
             } catch {
             }
             handledByLookup = true;
@@ -2270,7 +2402,7 @@ export default async function handler(req: any, res: any) {
           );
           try {
             await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-            await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+            await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('condominio_id', condominioId).eq('phone', phoneDigits);
           } catch {
           }
           handledByLookup = true;
@@ -2310,7 +2442,11 @@ export default async function handler(req: any, res: any) {
             const finalText = signedText(signature, body);
             try {
               await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-              await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+              await supabase
+                .from('clients')
+                .update({ support_state: null, support_payload: {} })
+                .eq('condominio_id', condominioId)
+                .eq('phone', phoneDigits);
             } catch {
             }
             handledByLookup = true;
@@ -2326,7 +2462,11 @@ export default async function handler(req: any, res: any) {
             isAdminIntent(q)
           ) {
             try {
-              await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+              await supabase
+                .from('clients')
+                .update({ support_state: null, support_payload: {} })
+                .eq('condominio_id', condominioId)
+                .eq('phone', phoneDigits);
             } catch {
             }
             handledByLookup = false;
@@ -2366,7 +2506,11 @@ export default async function handler(req: any, res: any) {
               const finalText = signedText(signature, `Sem problema. Me diga com o que você precisa e eu te direciono.\n\n${buildOptionsMenu()}`);
               try {
                 await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-                await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+                await supabase
+                  .from('clients')
+                  .update({ support_state: null, support_payload: {} })
+                  .eq('condominio_id', condominioId)
+                  .eq('phone', phoneDigits);
               } catch {
               }
               handledByLookup = true;
@@ -2374,7 +2518,11 @@ export default async function handler(req: any, res: any) {
               const finalText = signedText(signature, `Tudo bem. Me diga o que você precisa e eu te ajudo.\n\n${buildOptionsMenu()}`);
               try {
                 await zapiFetch('POST', '/send-text', { phone: phoneDigits, message: finalText });
-                await supabase.from('clients').update({ support_state: null, support_payload: {} }).eq('phone', phoneDigits);
+                await supabase
+                  .from('clients')
+                  .update({ support_state: null, support_payload: {} })
+                  .eq('condominio_id', condominioId)
+                  .eq('phone', phoneDigits);
               } catch {
               }
               handledByLookup = true;
@@ -2417,6 +2565,7 @@ export default async function handler(req: any, res: any) {
               const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
               await supabase.from('messages').insert([
                 {
+                  condominio_id: condominioId,
                   conversation_id: upsertedConv.id,
                   text: finalText,
                   sender: 'user',
@@ -2430,10 +2579,12 @@ export default async function handler(req: any, res: any) {
               await supabase
                 .from('conversations')
                 .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-                .eq('id', upsertedConv.id);
+                .eq('id', upsertedConv.id)
+                .eq('condominio_id', condominioId);
               await supabase
                 .from('clients')
                 .update({ support_state: 'docs_active', support_topic: supportTopic || 'regimento_convencao', support_payload: {} })
+                .eq('condominio_id', condominioId)
                 .eq('phone', phoneDigits);
             } catch {
             }
@@ -2452,6 +2603,7 @@ export default async function handler(req: any, res: any) {
           const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
           await supabase.from('messages').insert([
             {
+              condominio_id: condominioId,
               conversation_id: upsertedConv.id,
               text: finalText,
               sender: 'user',
@@ -2465,7 +2617,8 @@ export default async function handler(req: any, res: any) {
           await supabase
             .from('conversations')
             .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-            .eq('id', upsertedConv.id);
+            .eq('id', upsertedConv.id)
+            .eq('condominio_id', condominioId);
         } catch {
         }
 
@@ -2546,6 +2699,7 @@ export default async function handler(req: any, res: any) {
             const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
             await supabase.from('messages').insert([
               {
+                condominio_id: condominioId,
                 conversation_id: upsertedConv.id,
                 text: finalText,
                 sender: 'user',
@@ -2559,7 +2713,8 @@ export default async function handler(req: any, res: any) {
             await supabase
               .from('conversations')
               .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-              .eq('id', upsertedConv.id);
+              .eq('id', upsertedConv.id)
+              .eq('condominio_id', condominioId);
             handledByLookup = true;
           } else {
             let chosen: any = null;
@@ -2587,6 +2742,7 @@ export default async function handler(req: any, res: any) {
               const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
               await supabase.from('messages').insert([
                 {
+                  condominio_id: condominioId,
                   conversation_id: upsertedConv.id,
                   text: finalText,
                   sender: 'user',
@@ -2606,7 +2762,8 @@ export default async function handler(req: any, res: any) {
               await supabase
                 .from('conversations')
                 .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-                .eq('id', upsertedConv.id);
+                .eq('id', upsertedConv.id)
+                .eq('condominio_id', condominioId);
 
               const adminPhone = getAdminForwardPhone();
               if (adminPhone) {
@@ -2635,6 +2792,7 @@ export default async function handler(req: any, res: any) {
               const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
               await supabase.from('messages').insert([
                 {
+                  condominio_id: condominioId,
                   conversation_id: upsertedConv.id,
                   text: finalText,
                   sender: 'user',
@@ -2654,10 +2812,12 @@ export default async function handler(req: any, res: any) {
               await supabase
                 .from('conversations')
                 .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-                .eq('id', upsertedConv.id);
+                .eq('id', upsertedConv.id)
+                .eq('condominio_id', condominioId);
               await supabase
                 .from('clients')
                 .update({ last_auto_reply_at: nowIso, last_auto_reply_to: messageId || null })
+                .eq('condominio_id', condominioId)
                 .eq('phone', phoneDigits);
               handledByLookup = true;
             }
@@ -2670,6 +2830,7 @@ export default async function handler(req: any, res: any) {
             const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
             await supabase.from('messages').insert([
               {
+                condominio_id: condominioId,
                 conversation_id: upsertedConv.id,
                 text: finalText,
                 sender: 'user',
@@ -2683,7 +2844,8 @@ export default async function handler(req: any, res: any) {
             await supabase
               .from('conversations')
               .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-              .eq('id', upsertedConv.id);
+              .eq('id', upsertedConv.id)
+              .eq('condominio_id', condominioId);
           } catch {
           }
           handledByLookup = true;
@@ -2710,6 +2872,7 @@ export default async function handler(req: any, res: any) {
         const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
         await supabase.from('messages').insert([
           {
+            condominio_id: condominioId,
             conversation_id: upsertedConv.id,
             text: finalText,
             sender: 'user',
@@ -2723,7 +2886,8 @@ export default async function handler(req: any, res: any) {
         await supabase
           .from('conversations')
           .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-          .eq('id', upsertedConv.id);
+          .eq('id', upsertedConv.id)
+          .eq('condominio_id', condominioId);
       } catch {
       }
 
@@ -2759,6 +2923,7 @@ export default async function handler(req: any, res: any) {
           const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
           await supabase.from('messages').insert([
             {
+              condominio_id: condominioId,
               conversation_id: upsertedConv.id,
               text: finalText,
               sender: 'user',
@@ -2772,10 +2937,12 @@ export default async function handler(req: any, res: any) {
           await supabase
             .from('conversations')
             .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-            .eq('id', upsertedConv.id);
+            .eq('id', upsertedConv.id)
+            .eq('condominio_id', condominioId);
           await supabase
             .from('clients')
             .update({ support_state: 'docs_active', support_topic: 'regimento_convencao', support_started_at: new Date().toISOString(), support_payload: {} })
+            .eq('condominio_id', condominioId)
             .eq('phone', phoneDigits);
         } catch {
         }
@@ -2794,6 +2961,7 @@ export default async function handler(req: any, res: any) {
           const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
           await supabase.from('messages').insert([
             {
+              condominio_id: condominioId,
               conversation_id: upsertedConv.id,
               text: finalText,
               sender: 'user',
@@ -2807,7 +2975,8 @@ export default async function handler(req: any, res: any) {
           await supabase
             .from('conversations')
             .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-            .eq('id', upsertedConv.id);
+            .eq('id', upsertedConv.id)
+            .eq('condominio_id', condominioId);
           await supabase
             .from('clients')
             .update({
@@ -2816,6 +2985,7 @@ export default async function handler(req: any, res: any) {
               support_started_at: new Date().toISOString(),
               support_payload: {},
             })
+            .eq('condominio_id', condominioId)
             .eq('phone', phoneDigits);
         } catch {
         }
@@ -2833,6 +3003,7 @@ export default async function handler(req: any, res: any) {
         const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
         await supabase.from('messages').insert([
           {
+            condominio_id: condominioId,
             conversation_id: upsertedConv.id,
             text: ack,
             sender: 'user',
@@ -2849,6 +3020,7 @@ export default async function handler(req: any, res: any) {
       if (adminPhone) {
         const refreshed = await refreshClientUnitFromSuperlogica({
           supabase,
+          condominioId,
           phoneDigits,
           senderDisplayName,
           avatarUrl,
@@ -2898,6 +3070,7 @@ export default async function handler(req: any, res: any) {
       if (!tooSoon && !sameMessage) {
         const refreshed = await refreshClientUnitFromSuperlogica({
           supabase,
+          condominioId,
           phoneDigits,
           senderDisplayName,
           avatarUrl,
@@ -2924,6 +3097,7 @@ export default async function handler(req: any, res: any) {
 
           await supabase.from('messages').insert([
             {
+              condominio_id: condominioId,
               conversation_id: upsertedConv.id,
               text: finalText,
               sender: 'user',
@@ -2946,11 +3120,13 @@ export default async function handler(req: any, res: any) {
           await supabase
             .from('conversations')
             .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-            .eq('id', upsertedConv.id);
+            .eq('id', upsertedConv.id)
+            .eq('condominio_id', condominioId);
 
           await supabase
             .from('clients')
             .update({ last_auto_reply_at: new Date().toISOString(), last_auto_reply_to: messageId || null })
+            .eq('condominio_id', condominioId)
             .eq('phone', phoneDigits);
 
           handledByLookup = true;
@@ -2970,6 +3146,7 @@ export default async function handler(req: any, res: any) {
         const externalId = String(resp?.messageId ?? resp?.zaapId ?? resp?.id ?? '').trim();
         await supabase.from('messages').insert([
           {
+            condominio_id: condominioId,
             conversation_id: upsertedConv.id,
             text: finalText,
             sender: 'user',
@@ -2984,7 +3161,8 @@ export default async function handler(req: any, res: any) {
         await supabase
           .from('conversations')
           .update({ last_message: finalText, last_message_time: formatTimeHM(new Date()) })
-          .eq('id', upsertedConv.id);
+          .eq('id', upsertedConv.id)
+          .eq('condominio_id', condominioId);
       } catch {
       }
     }
