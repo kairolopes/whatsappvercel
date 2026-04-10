@@ -468,7 +468,10 @@ function getAiSignatureName(): string {
 }
 
 function shouldAutoReply(): boolean {
-  return String(process.env.AI_AUTOREPLY || '').trim().toLowerCase() === 'true';
+  const v = String(process.env.AI_AUTOREPLY || '').trim().toLowerCase();
+  if (!v) return true;
+  if (v === 'false' || v === '0' || v === 'no' || v === 'nao' || v === 'não') return false;
+  return v === 'true' || v === '1' || v === 'yes' || v === 'sim';
 }
 
 function getAiModel(): string {
