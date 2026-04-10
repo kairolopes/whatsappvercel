@@ -490,6 +490,28 @@ function normalizeZapiCfg(row: any): ZapiCfg | null {
   return { instanceId, token, clientToken };
 }
 
+async function trySendAutoReplyWithoutDb(params: {
+  zapiFetch: (method: string, path: string, body?: any) => Promise<any>;
+  phone: string;
+  signature: string;
+  senderDisplayName: string;
+  incomingText: string;
+}) {
+  if (!shouldAutoReply()) return false;
+  if (!params.incomingText) return false;
+  if (isOffTopicChitChat(params.incomingText)) return false;
+  const resolvedName = isValidPersonName(params.senderDisplayName) ? firstName(params.senderDisplayName) : '';
+  const prefix = resolvedName ? `Oi, ${resolvedName}. ` : 'Oi. ';
+  const body = `${prefix}Posso te ajudar com:\n\n${buildOptionsMenu()}`;
+  const finalText = signedText(params.signature, body);
+  try {
+    await params.zapiFetch('POST', '/send-text', { phone: params.phone, message: finalText });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function envZapiCfg(kind: 'primary' | 'secondary'): ZapiCfg | null {
   const instanceId = String(kind === 'primary' ? process.env.ZAPI_INSTANCE_ID : process.env.ZAPI2_INSTANCE_ID || '').trim();
   const token = String(kind === 'primary' ? process.env.ZAPI_TOKEN : process.env.ZAPI2_TOKEN || '').trim();
@@ -1526,7 +1548,24 @@ export default async function handler(req: any, res: any) {
     .single();
 
   if (convError) {
-    res.status(200).json({ ok: true, stored: true, synced: false, reason: 'conversation_upsert_failed' });
+    const signature = getAiSignatureName();
+    const incomingText = typeof text === 'string' ? text : '';
+    const replied =
+      inferredFromMe === false
+        ? await trySendAutoReplyWithoutDb({
+            zapiFetch,
+            phone,
+            signature,
+            senderDisplayName,
+            incomingText,
+          })
+        : false;
+
+    const debug = allowDefaultTenant
+      ? { code: (convError as any)?.code ?? null, message: (convError as any)?.message ?? null }
+      : undefined;
+
+    res.status(200).json({ ok: true, stored: true, synced: false, replied, reason: 'conversation_upsert_failed', debug });
     return;
   }
 

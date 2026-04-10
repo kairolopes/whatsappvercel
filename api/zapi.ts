@@ -1,3 +1,5 @@
+import { createClient } from '@supabase/supabase-js';
+
 type AnyReq = any;
 type AnyRes = any;
 
@@ -16,39 +18,71 @@ async function readJsonBody(req: AnyReq): Promise<any> {
   return req?.body ?? null;
 }
 
-function requireAdminIfConfigured(req: AnyReq, res: AnyRes): boolean {
-  const expected = process.env.ADMIN_API_KEY;
-  if (!expected) return true;
+let supabaseAdmin: any | null = null;
 
-  const builtInSharedSecret = 'rokzap_2026_03_29_a8d2b7c1f4e9';
-  const fallbackSharedSecret = process.env.ZAPI_SHARED_SECRET || builtInSharedSecret;
+function getSupabaseAdmin() {
+  if (supabaseAdmin) return supabaseAdmin;
+  const url = String(process.env.SUPABASE_URL || '').trim();
+  const serviceKey =
+    String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim() ||
+    String(process.env.SUPABASE_SERVICE_KEY || '').trim() ||
+    String(process.env.SUPABASE_SERVICE_ROLE || '').trim();
+  if (!url || !serviceKey) throw new Error('missing_supabase_service_key');
+  supabaseAdmin = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
+  return supabaseAdmin;
+}
 
-  const cookieHeader = String(req.headers?.cookie ?? '');
-  const cookies = Object.fromEntries(
-    cookieHeader
-      .split(';')
-      .map((v: string) => v.trim())
-      .filter(Boolean)
-      .map((pair: string) => {
-        const idx = pair.indexOf('=');
-        if (idx === -1) return [pair, ''] as const;
-        return [pair.slice(0, idx), decodeURIComponent(pair.slice(idx + 1))] as const;
-      }),
-  );
+function getBearerToken(req: AnyReq) {
+  const raw = String(req.headers?.authorization || '').trim();
+  if (!raw.toLowerCase().startsWith('bearer ')) return '';
+  return raw.slice(7).trim();
+}
 
-  const receivedHeader = req.headers?.['x-admin-token'] ?? req.headers?.['X-Admin-Token'];
-  const receivedCookie = cookies.zapi_admin;
+function getCondominioId(req: AnyReq) {
+  const v = req.headers?.['x-condominio-id'] ?? req.headers?.['X-Condominio-Id'] ?? req.headers?.['x-condominio'] ?? '';
+  return String(v || '').trim();
+}
 
-  const okAdmin = receivedHeader === expected || receivedCookie === expected;
-  const okShared =
-    Boolean(fallbackSharedSecret) &&
-    (receivedHeader === fallbackSharedSecret || receivedCookie === fallbackSharedSecret);
-
-  if (!okAdmin && !okShared) {
+async function requireTenantAdmin(req: AnyReq, res: AnyRes) {
+  const token = getBearerToken(req);
+  if (!token) {
     json(res, 401, { ok: false, reason: 'unauthorized' });
-    return false;
+    return null;
   }
-  return true;
+
+  const condominioId = getCondominioId(req);
+  if (!condominioId) {
+    json(res, 400, { ok: false, reason: 'missing_condominio' });
+    return null;
+  }
+
+  const sb = getSupabaseAdmin();
+  const { data: userData, error: userErr } = await sb.auth.getUser(token);
+  const userId = String(userData?.user?.id || '').trim();
+  if (userErr || !userId) {
+    json(res, 401, { ok: false, reason: 'unauthorized' });
+    return null;
+  }
+
+  const { data: membership, error: mErr } = await sb
+    .from('membros_condominio')
+    .select('role,ativo')
+    .eq('user_id', userId)
+    .eq('condominio_id', condominioId)
+    .eq('ativo', true)
+    .maybeSingle();
+  if (mErr || !membership) {
+    json(res, 403, { ok: false, reason: 'forbidden' });
+    return null;
+  }
+
+  const role = String((membership as any)?.role || '').trim();
+  if (!(role === 'admin' || role === 'master')) {
+    json(res, 403, { ok: false, reason: 'forbidden' });
+    return null;
+  }
+
+  return { sb, userId, condominioId, role } as const;
 }
 
 const memoryCounters = new Map<string, { resetAt: number; count: number }>();
@@ -73,22 +107,33 @@ function rateLimit(req: AnyReq, res: AnyRes, opts?: { limit?: number; windowMs?:
   return true;
 }
 
-function getZapiConfig() {
-  const instanceId = process.env.ZAPI_INSTANCE_ID;
-  const token = process.env.ZAPI_TOKEN;
-  const clientToken = process.env.ZAPI_CLIENT_TOKEN;
+type ZapiCfg = { instanceId: string; token: string; clientToken: string };
+
+function normalizeZapiCfg(row: any): ZapiCfg | null {
+  const instanceId = String(row?.instance_id ?? '').trim();
+  const token = String(row?.token ?? '').trim();
+  const clientToken = String(row?.client_token ?? '').trim();
   if (!instanceId || !token || !clientToken) return null;
   return { instanceId, token, clientToken };
 }
 
-async function zapiFetch(method: string, path: string, body?: any) {
-  const cfg = getZapiConfig();
+async function getZapiConfigForTenant(sb: any, condominioId: string): Promise<ZapiCfg> {
+  const { data, error } = await sb
+    .from('zapi_config')
+    .select('instance_id,token,client_token')
+    .eq('condominio_id', condominioId)
+    .maybeSingle();
+  if (error) throw error;
+  const cfg = normalizeZapiCfg(data);
   if (!cfg) {
-    const err: any = new Error('missing_zapi_env');
-    err.status = 500;
+    const err: any = new Error('missing_zapi_tenant_config');
+    err.status = 400;
     throw err;
   }
+  return cfg;
+}
 
+async function zapiFetchWithCfg(cfg: ZapiCfg, method: string, path: string, body?: any) {
   const baseUrl = `https://api.z-api.io/instances/${cfg.instanceId}/token/${cfg.token}`;
   const url = `${baseUrl}${path}`;
 
@@ -141,6 +186,12 @@ export default async function handler(req: AnyReq, res: AnyRes) {
 
     const hasOpenAiKey = Boolean(String(process.env.OPENAI_API_KEY || '').trim());
     const hasGeminiKey = Boolean(String(process.env.GOOGLE_API_KEY || '').trim());
+    const hasSupabaseUrl = Boolean(String(process.env.SUPABASE_URL || '').trim());
+    const hasSupabaseServiceRoleKey = Boolean(
+      String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim() ||
+        String(process.env.SUPABASE_SERVICE_KEY || '').trim() ||
+        String(process.env.SUPABASE_SERVICE_ROLE || '').trim(),
+    );
 
     json(res, 200, {
       ok: true,
@@ -151,52 +202,23 @@ export default async function handler(req: AnyReq, res: AnyRes) {
       url: vercelUrl ? `https://${vercelUrl}` : null,
       hasOpenAiKey,
       hasGeminiKey,
+      hasSupabaseUrl,
+      hasSupabaseServiceRoleKey,
       serverTime: new Date().toISOString(),
     });
     return;
   }
 
-  if (route === 'login' && req.method === 'POST') {
-    const expected = process.env.ADMIN_API_KEY;
-    const builtInSharedSecret = 'rokzap_2026_03_29_a8d2b7c1f4e9';
-    const fallbackSharedSecret = process.env.ZAPI_SHARED_SECRET || builtInSharedSecret;
-    const body = await readJsonBody(req);
-    const token = String(body?.token ?? '');
-    const okAdmin = Boolean(expected) && token === expected;
-    const okShared = Boolean(fallbackSharedSecret) && token === fallbackSharedSecret;
-
-    if (!token || (!okAdmin && !okShared)) {
-      json(res, 401, { ok: false, reason: 'invalid_token' });
-      return;
-    }
-    res.setHeader(
-      'set-cookie',
-      `zapi_admin=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}`,
-    );
-    json(res, 200, { ok: true });
-    return;
-  }
-
-  if (route === 'logout' && req.method === 'POST') {
-    res.setHeader('set-cookie', 'zapi_admin=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0');
-    json(res, 200, { ok: true });
-    return;
-  }
-
-  if (!requireAdminIfConfigured(req, res)) return;
-  const cfg = getZapiConfig();
-  if (!cfg) {
-    json(res, 500, { ok: false, reason: 'missing_zapi_env' });
-    return;
-  }
+  const ctx = await requireTenantAdmin(req, res);
+  if (!ctx) return;
+  const cfg = await getZapiConfigForTenant(ctx.sb, ctx.condominioId);
+  const zapiFetch = (method: string, path: string, body?: any) => zapiFetchWithCfg(cfg, method, path, body);
 
   try {
     if (route === '' && req.method === 'GET') {
       json(res, 200, {
         ok: true,
         routes: [
-          'login',
-          'logout',
           'version',
           'contacts',
           'chats',
